@@ -1,1 +1,0 @@
-# Medical-Consultation-Assistant
