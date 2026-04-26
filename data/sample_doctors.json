@@ -1,0 +1,38 @@
+[
+  {
+    "id": 1,
+    "name": "Dr. Sarah Mitchell",
+    "specialty": "Dermatologist",
+    "hospital": "City General Hospital",
+    "location": {
+      "lat": 40.7128,
+      "lng": -74.0060
+    },
+    "availability": "9 AM - 5 PM",
+    "contact": "+1-555-0199"
+  },
+  {
+    "id": 2,
+    "name": "Dr. James Wilson",
+    "specialty": "Pediatrician",
+    "hospital": "Children's Health Center",
+    "location": {
+      "lat": 40.7306,
+      "lng": -73.9352
+    },
+    "availability": "10 AM - 6 PM",
+    "contact": "+1-555-0200"
+  },
+  {
+    "id": 3,
+    "name": "Dr. Elena Rodriguez",
+    "specialty": "Cardiologist",
+    "hospital": "Heart and Vascular Institute",
+    "location": {
+      "lat": 40.7589,
+      "lng": -73.9851
+    },
+    "availability": "8 AM - 4 PM",
+    "contact": "+1-555-0201"
+  }
+]

@@ -1,0 +1,94 @@
+{
+  "doctors": [
+    {
+      "id": "b1",
+      "city": "Bangalore",
+      "name": "Dr. Anjali Sharma",
+      "specialty": "Cardiologist",
+      "address": "12, MG Road, Bengaluru, Karnataka 560001",
+      "lat": 12.9758,
+      "lng": 77.6065
+    },
+    {
+      "id": "b2",
+      "city": "Bangalore",
+      "name": "Dr. Ravi Kumar",
+      "specialty": "General Physician",
+      "address": "45, Indiranagar 100ft Road, Bengaluru, Karnataka 560038",
+      "lat": 12.9784,
+      "lng": 77.6408
+    },
+    {
+      "id": "b3",
+      "city": "Bangalore",
+      "name": "Dr. Priya Menon",
+      "specialty": "Neurologist",
+      "address": "7, Koramangala 5th Block, Bengaluru, Karnataka 560095",
+      "lat": 12.9352,
+      "lng": 77.6245
+    },
+    {
+      "id": "b4",
+      "city": "Bangalore",
+      "name": "Dr. Suresh Patel",
+      "specialty": "Pulmonologist",
+      "address": "88, Jayanagar 4th T Block, Bengaluru, Karnataka 560041",
+      "lat": 12.9250,
+      "lng": 77.5938
+    },
+    {
+      "id": "b5",
+      "city": "Bangalore",
+      "name": "Dr. Deepa Nair",
+      "specialty": "Internal Medicine",
+      "address": "3, Whitefield Main Rd, Bengaluru, Karnataka 560066",
+      "lat": 12.9698,
+      "lng": 77.7499
+    },
+    {
+      "id": "m1",
+      "city": "Mumbai",
+      "name": "Dr. Farhan Qureshi",
+      "specialty": "Cardiologist",
+      "address": "Lilavati Hospital, Bandra West, Mumbai 400050",
+      "lat": 19.0509,
+      "lng": 72.8276
+    },
+    {
+      "id": "m2",
+      "city": "Mumbai",
+      "name": "Dr. Sunita Rao",
+      "specialty": "General Physician",
+      "address": "Hinduja Hospital, Mahim, Mumbai 400016",
+      "lat": 19.0372,
+      "lng": 72.8417
+    },
+    {
+      "id": "m3",
+      "city": "Mumbai",
+      "name": "Dr. Arjun Mehta",
+      "specialty": "Neurologist",
+      "address": "Breach Candy Hospital, Bhulabhai Desai Rd, Mumbai 400026",
+      "lat": 18.9676,
+      "lng": 72.8090
+    },
+    {
+      "id": "m4",
+      "city": "Mumbai",
+      "name": "Dr. Kavita Desai",
+      "specialty": "Pulmonologist",
+      "address": "Kokilaben Hospital, Andheri West, Mumbai 400053",
+      "lat": 19.1334,
+      "lng": 72.8329
+    },
+    {
+      "id": "m5",
+      "city": "Mumbai",
+      "name": "Dr. Rahul Joshi",
+      "specialty": "Internal Medicine",
+      "address": "Jaslok Hospital, Pedder Road, Mumbai 400026",
+      "lat": 18.9726,
+      "lng": 72.8092
+    }
+  ]
+}
