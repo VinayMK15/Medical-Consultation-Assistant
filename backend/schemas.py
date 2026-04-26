@@ -21,6 +21,8 @@ class UserResponse(BaseModel):
     role: str
     is_verified: bool
     specialization: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
 
     class Config:
         from_attributes = True

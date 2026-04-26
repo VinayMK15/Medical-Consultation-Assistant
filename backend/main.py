@@ -30,7 +30,6 @@ sessions: dict = {}
 
 # ---------------------------------------------------------------------------
 # Symptom -> Medical Specialist mapping
-# Keys must match specialty strings used in doctors.json exactly.
 # ---------------------------------------------------------------------------
 SYMPTOM_SPECIALIST_MAP = {
     # Cardiology
