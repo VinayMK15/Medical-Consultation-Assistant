@@ -11,72 +11,191 @@ logger = logging.getLogger(__name__)
 
 # Symptom keywords → canonical symptom string (longest match wins)
 _SYMPTOM_KEYWORDS: list[tuple[str, str]] = sorted([
-    ("chest pain",          "chest pain"),
-    ("heart pain",          "chest pain"),
-    ("palpitations",        "palpitations"),
-    ("heart attack",        "heart attack"),
-    ("shortness of breath", "shortness of breath"),
-    ("breathing problem",   "shortness of breath"),
-    ("difficulty breathing","shortness of breath"),
-    ("headache",            "headache"),
-    ("migraine",            "migraine"),
-    ("dizziness",           "dizziness"),
-    ("seizure",             "seizure"),
-    ("cough",               "cough"),
-    ("asthma",              "asthma"),
-    ("stomach pain",        "stomach pain"),
-    ("abdominal pain",      "stomach pain"),
-    ("nausea",              "nausea"),
-    ("vomiting",            "vomiting"),
-    ("fever",               "fever"),
-    ("cold",                "cold"),
-    ("flu",                 "flu"),
-    ("fatigue",             "fatigue"),
-    ("weakness",            "weakness"),
-    ("back pain",           "back pain"),
-    ("joint pain",          "joint pain"),
-    ("rash",                "rash"),
-    ("swelling",            "swelling"),
-    ("diabetes",            "diabetes"),
-    ("hypertension",        "hypertension"),
-    ("blood pressure",      "hypertension"),
+    # Cardiology
+    ("chest pain",              "chest pain"),
+    ("heart pain",              "chest pain"),
+    ("palpitations",            "palpitations"),
+    ("heart attack",            "heart attack"),
+    ("chest tightness",         "chest tightness"),
+    # Neurology
+    ("shortness of breath",     "shortness of breath"),
+    ("breathing problem",       "shortness of breath"),
+    ("difficulty breathing",    "shortness of breath"),
+    ("headache",                "headache"),
+    ("migraine",                "migraine"),
+    ("dizziness",               "dizziness"),
+    ("seizure",                 "seizure"),
+    ("numbness",                "numbness"),
+    ("stroke",                  "stroke"),
+    # Pulmonology
+    ("cough",                   "cough"),
+    ("asthma",                  "asthma"),
+    ("wheezing",                "wheezing"),
+    # Internal Medicine / General
+    ("stomach pain",            "stomach pain"),
+    ("abdominal pain",          "stomach pain"),
+    ("nausea",                  "nausea"),
+    ("vomiting",                "vomiting"),
+    ("fever",                   "fever"),
+    ("cold",                    "cold"),
+    ("flu",                     "flu"),
+    ("fatigue",                 "fatigue"),
+    ("weakness",                "weakness"),
+    # Orthopedics
+    ("broke my arm",            "broke my arm"),
+    ("broken arm",              "broken arm"),
+    ("broken leg",              "broken leg"),
+    ("broken bone",             "broken bone"),
+    ("bone pain",               "bone pain"),
+    ("joint pain",              "joint pain"),
+    ("knee pain",               "knee pain"),
+    ("back pain",               "back pain"),
+    ("fracture",                "fracture"),
+    ("sprain",                  "sprain"),
+    # Dermatology
+    ("skin rash",               "skin rash"),
+    ("skin infection",          "skin infection"),
+    ("rash",                    "rash"),
+    ("acne",                    "acne"),
+    ("eczema",                  "eczema"),
+    ("psoriasis",               "psoriasis"),
+    ("itching",                 "itching"),
+    ("swelling",                "swelling"),
+    # Psychiatry
+    ("panic attack",            "panic attack"),
+    ("mental health",           "mental health"),
+    ("anxiety",                 "anxiety"),
+    ("depression",              "depression"),
+    ("insomnia",                "insomnia"),
+    ("stress",                  "stress"),
+    # Gastroenterology
+    ("acid reflux",             "acid reflux"),
+    ("diarrhea",                "diarrhea"),
+    ("constipation",            "constipation"),
+    ("bloating",                "bloating"),
+    ("heartburn",               "heartburn"),
+    ("ibs",                     "ibs"),
+    # Endocrinology
+    ("diabetes",                "diabetes"),
+    ("thyroid",                 "thyroid"),
+    ("weight gain",             "weight gain"),
+    ("hormonal",                "hormonal imbalance"),
+    ("hypertension",            "hypertension"),
+    ("blood pressure",          "hypertension"),
+    # Ophthalmology
+    ("blurry vision",           "blurry vision"),
+    ("vision loss",             "vision loss"),
+    ("eye pain",                "eye pain"),
+    ("red eye",                 "red eye"),
+    # ENT
+    ("hearing loss",            "hearing loss"),
+    ("nose bleed",              "nose bleed"),
+    ("sore throat",             "sore throat"),
+    ("sinusitis",               "sinusitis"),
+    ("ear pain",                "ear pain"),
+    ("tonsils",                 "tonsils"),
+    # Urology
+    ("frequent urination",      "frequent urination"),
+    ("urinary pain",            "urinary pain"),
+    ("kidney stone",            "kidney stone"),
+    # Oncology
+    ("cancer",                  "cancer"),
+    ("tumor",                   "tumor"),
+    ("lump",                    "lump"),
+    # Pediatrics
+    ("child fever",             "child fever"),
+    ("infant",                  "infant illness"),
+    ("baby",                    "infant illness"),
 ], key=lambda t: len(t[0]), reverse=True)  # Longest first → greedy match
 
 # City keywords → canonical (Title-cased) city name
 _CITY_KEYWORDS: dict[str, str] = {
-    "bangalore":  "Bangalore",
-    "bengaluru":  "Bangalore",
-    "mumbai":     "Mumbai",
-    "bombay":     "Mumbai",
-    "delhi":      "Delhi",
-    "new delhi":  "Delhi",
-    "chennai":    "Chennai",
-    "madras":     "Chennai",
-    "kolkata":    "Kolkata",
-    "calcutta":   "Kolkata",
-    "hyderabad":  "Hyderabad",
-    "pune":       "Pune",
-    "ahmedabad":  "Ahmedabad",
-    "jaipur":     "Jaipur",
-    "surat":      "Surat",
-    "lucknow":    "Lucknow",
-    "kanpur":     "Kanpur",
-    "nagpur":     "Nagpur",
-    "indore":     "Indore",
-    "bhopal":     "Bhopal",
-    "london":     "London",
-    "new york":   "New York",
+    # Major Indian cities
+    "bangalore":        "Bangalore",
+    "bengaluru":        "Bangalore",
+    "mumbai":           "Mumbai",
+    "bombay":           "Mumbai",
+    "delhi":            "Delhi",
+    "new delhi":        "Delhi",
+    "chennai":          "Chennai",
+    "madras":           "Chennai",
+    "kolkata":          "Kolkata",
+    "calcutta":         "Kolkata",
+    "hyderabad":        "Hyderabad",
+    "pune":             "Pune",
+    "ahmedabad":        "Ahmedabad",
+    "jaipur":           "Jaipur",
+    "surat":            "Surat",
+    "lucknow":          "Lucknow",
+    "kanpur":           "Kanpur",
+    "nagpur":           "Nagpur",
+    "indore":           "Indore",
+    "bhopal":           "Bhopal",
+    "london":           "London",
+    "new york":         "New York",
+    # Bangalore neighbourhoods — all resolve to "Bangalore" as the parent city
+    "whitefield":       "Bangalore",
+    "koramangala":      "Bangalore",
+    "indiranagar":      "Bangalore",
+    "jayanagar":        "Bangalore",
+    "malleswaram":      "Bangalore",
+    "hsr layout":       "Bangalore",
+    "btm layout":       "Bangalore",
+    "electronic city":  "Bangalore",
+    "marathahalli":     "Bangalore",
+    "hebbal":           "Bangalore",
+    "yelahanka":        "Bangalore",
+    "banashankari":     "Bangalore",
+    "bellandur":        "Bangalore",
+    "rajajinagar":      "Bangalore",
+    "jp nagar":         "Bangalore",
 }
+
+
+def normalize_city(city: str | None) -> str | None:
+    """
+    Canonicalize a raw city string using the _CITY_KEYWORDS alias map.
+
+    Examples
+    --------
+    normalize_city("Bengaluru")  -> "Bangalore"
+    normalize_city("Bombay")     -> "Mumbai"
+    normalize_city("London")     -> "London"
+    normalize_city(None)         -> None
+    """
+    if not city:
+        return None
+    return _CITY_KEYWORDS.get(city.strip().lower(), city)
 
 
 def _regex_fallback(text: str) -> dict:
     """
-    Best-effort symptom + city extraction using keyword matching.
+    Best-effort symptom + city + area extraction using keyword matching.
     Called when the Ollama LLM is unavailable or returns bad output.
     """
     lower = text.lower()
     detected_symptom = None
     detected_city    = None
+    detected_area    = None
+
+    # Bangalore area names — checked separately so we can populate the area field
+    _BANGALORE_AREAS: dict[str, str] = {
+        "whitefield":       "Whitefield",
+        "koramangala":      "Koramangala",
+        "indiranagar":      "Indiranagar",
+        "jayanagar":        "Jayanagar",
+        "malleswaram":      "Malleswaram",
+        "hsr layout":       "HSR Layout",
+        "btm layout":       "BTM Layout",
+        "electronic city":  "Electronic City",
+        "marathahalli":     "Marathahalli",
+        "hebbal":           "Hebbal",
+        "yelahanka":        "Yelahanka",
+        "banashankari":     "Banashankari",
+        "bellandur":        "Bellandur",
+        "rajajinagar":      "Rajajinagar",
+        "jp nagar":         "JP Nagar",
+    }
 
     # ── Symptom detection (longest-match first) ──
     for keyword, canonical in _SYMPTOM_KEYWORDS:
@@ -84,18 +203,25 @@ def _regex_fallback(text: str) -> dict:
             detected_symptom = canonical
             break
 
-    # ── City detection ──
-    # Check multi-word cities before single-word ones (already ordered by key length)
-    for keyword in sorted(_CITY_KEYWORDS, key=len, reverse=True):
+    # ── Area detection (check Bangalore areas first, longest match first) ──
+    for keyword in sorted(_BANGALORE_AREAS, key=len, reverse=True):
         if keyword in lower:
-            detected_city = _CITY_KEYWORDS[keyword]
+            detected_area = _BANGALORE_AREAS[keyword]
+            detected_city = "Bangalore"   # area implies the parent city
             break
 
+    # ── City detection (only if city not already set by area match) ──
+    if not detected_city:
+        for keyword in sorted(_CITY_KEYWORDS, key=len, reverse=True):
+            if keyword in lower:
+                detected_city = _CITY_KEYWORDS[keyword]
+                break
+
     logger.info(
-        "regex_fallback: symptoms=%r  city=%r  (input=%r)",
-        detected_symptom, detected_city, text,
+        "regex_fallback: symptoms=%r  city=%r  area=%r  (input=%r)",
+        detected_symptom, detected_city, detected_area, text,
     )
-    return {"symptoms": detected_symptom, "city": detected_city, "area": None}
+    return {"symptoms": detected_symptom, "city": detected_city, "area": detected_area}
 
 
 # ---------------------------------------------------------------------------

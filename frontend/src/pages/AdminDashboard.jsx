@@ -6,6 +6,7 @@ const statusStyles = {
   pending: 'bg-amber-50 text-amber-700 border-amber-200',
   approved: 'bg-green-50 text-green-700 border-green-200',
   restricted: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  rejected: 'bg-red-50 text-red-700 border-red-200',
 };
 
 function Badge({ children, tone = 'pending' }) {
@@ -77,6 +78,31 @@ export default function AdminDashboard() {
       ]);
     } catch (err) {
       setApiError(err.response?.data?.detail || 'Failed to approve provider account.');
+    } finally {
+      setLoadingId(null);
+    }
+  };
+
+  const handleReject = async (doctor) => {
+    setLoadingId(doctor.id + '_reject');
+    setApiError('');
+
+    try {
+      await api.delete(`/api/admin/reject-doctor/${doctor.id}`);
+      setPendingDoctors((prev) => prev.filter((item) => item.id !== doctor.id));
+      setActionLog((prev) => [
+        {
+          id: doctor.id,
+          name: doctor.full_name || doctor.email,
+          email: doctor.email,
+          specialization: doctor.specialization || 'Unspecified',
+          action: 'Rejected',
+          time: new Date().toLocaleTimeString(),
+        },
+        ...prev,
+      ]);
+    } catch (err) {
+      setApiError(err.response?.data?.detail || 'Failed to reject provider account.');
     } finally {
       setLoadingId(null);
     }
@@ -200,13 +226,22 @@ export default function AdminDashboard() {
                           <Badge>Pending verification</Badge>
                         </td>
                         <td className="px-6 py-4 text-right">
-                          <button
-                            onClick={() => handleApprove(doctor)}
-                            disabled={loadingId === doctor.id}
-                            className="rounded-xl bg-green-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-green-500/20 transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-70"
-                          >
-                            {loadingId === doctor.id ? 'Approving...' : 'Approve'}
-                          </button>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              onClick={() => handleReject(doctor)}
+                              disabled={loadingId === doctor.id || loadingId === doctor.id + '_reject'}
+                              className="rounded-xl bg-red-100 px-4 py-2 text-xs font-bold text-red-600 transition hover:bg-red-200 disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                              {loadingId === doctor.id + '_reject' ? 'Rejecting...' : 'Reject'}
+                            </button>
+                            <button
+                              onClick={() => handleApprove(doctor)}
+                              disabled={loadingId === doctor.id || loadingId === doctor.id + '_reject'}
+                              className="rounded-xl bg-green-600 px-4 py-2 text-xs font-bold text-white shadow-sm shadow-green-500/20 transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                              {loadingId === doctor.id ? 'Approving...' : 'Approve'}
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -236,7 +271,7 @@ export default function AdminDashboard() {
                         <p className="mt-1 text-xs text-slate-400">{entry.email}</p>
                         <p className="mt-1 text-xs font-semibold text-indigo-600">{entry.specialization}</p>
                       </div>
-                      <Badge tone="approved">{entry.action}</Badge>
+                      <Badge tone={entry.action === 'Approved' ? 'approved' : 'rejected'}>{entry.action}</Badge>
                     </div>
                     <p className="mt-2 text-xs text-slate-400">{entry.time}</p>
                   </li>

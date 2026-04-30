@@ -36,7 +36,7 @@ function RecenterMap({ coords }) {
   return null;
 }
 
-function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle }) {
+function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDoctor }) {
   const title = doctors.length > 0 ? `${doctors.length} doctors near ${city}` : 'No matches yet';
 
   if (isCollapsed) {
@@ -88,8 +88,8 @@ function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle }) {
         ) : (
           <div className="space-y-2">
             {doctors.map((doc, index) => (
-              <div key={doc.id} className="rounded-xl border border-slate-100 bg-slate-50 p-4">
-                <div className="flex items-start gap-3">
+              <div key={doc.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                <div className="flex items-start gap-3 min-w-0">
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
                     {index + 1}
                   </span>
@@ -99,6 +99,12 @@ function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle }) {
                     <p className="mt-2 text-xs leading-5 text-slate-500">{doc.address}</p>
                   </div>
                 </div>
+                <button
+                  onClick={() => onBookDoctor(doc)}
+                  className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                >
+                  Book Now
+                </button>
               </div>
             ))}
           </div>
@@ -232,6 +238,159 @@ function getOrCreateSessionId(userEmail) {
   return id;
 }
 
+function BookingModal({ isOpen, onClose, doctor, onConfirm }) {
+  const [date, setDate] = useState('');
+  const [time, setTime] = useState('');
+  const [symptoms, setSymptoms] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  if (!isOpen) return null;
+
+  const doctorInitials = doctor?.name
+    ?.split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0])
+    .join('')
+    .toUpperCase() || 'DR';
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!date || !time) return;
+    setIsSubmitting(true);
+    try {
+      const appointmentTime = new Date(`${date}T${time}`).toISOString();
+      await onConfirm({
+        doctor_id: doctor.id,
+        appointment_time: appointmentTime,
+        symptoms_summary: symptoms.trim() || 'Routine Checkup',
+      });
+      // Reset fields on success (parent handles close)
+      setDate('');
+      setTime('');
+      setSymptoms('');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm px-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl">
+
+        {/* ── Header ── */}
+        <div className="flex items-center gap-4 border-b border-slate-100 px-6 py-5">
+          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-blue-100 text-lg font-bold text-blue-700">
+            {doctorInitials}
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs font-bold uppercase tracking-[0.16em] text-teal-600">Book Appointment</p>
+            <h3 className="mt-0.5 truncate text-lg font-bold text-slate-900">{doctor?.name}</h3>
+            {doctor?.specialty && (
+              <span className="mt-1 inline-block rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-bold text-blue-700">
+                {doctor.specialty}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            aria-label="Close modal"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+              <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+            </svg>
+          </button>
+        </div>
+
+        {/* ── Form ── */}
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-5">
+
+          {/* Date + Time in 2-column grid */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                Date
+              </label>
+              <input
+                type="date"
+                required
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                min={new Date().toISOString().split('T')[0]}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+              />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                Time
+              </label>
+              <input
+                type="time"
+                required
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+              />
+            </div>
+          </div>
+
+          {/* Symptoms / Reason */}
+          <div>
+            <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
+              Reason for Visit <span className="normal-case font-medium text-slate-400">(Optional)</span>
+            </label>
+            <textarea
+              rows={3}
+              value={symptoms}
+              onChange={(e) => setSymptoms(e.target.value)}
+              placeholder="Briefly describe your symptoms or reason for the visit..."
+              className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="flex items-center justify-between border-t border-slate-100 pt-4">
+            <p className="text-xs text-slate-400">You can cancel any time before the appointment.</p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isSubmitting}
+                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting || !date || !time}
+                className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2 text-sm font-bold text-white shadow-md shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isSubmitting ? (
+                  <>
+                    <svg className="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                    Confirming...
+                  </>
+                ) : (
+                  'Confirm Booking'
+                )}
+              </button>
+            </div>
+          </div>
+        </form>
+
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { user, logout } = useContext(AuthContext);
   const navigate = useNavigate();
@@ -250,6 +409,33 @@ export default function Dashboard() {
   const [isRouteSummaryCollapsed, setIsRouteSummaryCollapsed] = useState(false);
   const [isDoctorsPanelCollapsed, setIsDoctorsPanelCollapsed] = useState(false);
   const chatBottomRef = useRef(null);
+
+  const [selectedDoctor, setSelectedDoctor] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const handleBookDoctor = (doctor) => {
+    setSelectedDoctor(doctor);
+    setIsModalOpen(true);
+  };
+
+  const handleConfirmBooking = async (payload) => {
+    try {
+      await api.post('/api/appointments', payload);
+      setIsModalOpen(false);
+      setSelectedDoctor(null);
+      // Add a success message to chat instead of a blocking alert
+      setMessages((prev) => [
+        ...prev,
+        {
+          sender: 'bot',
+          text: `Your appointment has been booked successfully! You'll find it in your profile under Appointment History.`,
+        },
+      ]);
+    } catch (error) {
+      console.error('Failed to book appointment:', error);
+      throw error; // Re-throw so the modal's isSubmitting resets correctly
+    }
+  };
 
   // Stable session ID: unique per user per tab, persists across refreshes
   const sessionIdRef = useRef(getOrCreateSessionId(user?.email));
@@ -422,6 +608,7 @@ export default function Dashboard() {
               city={mapCity}
               isCollapsed={isDoctorsPanelCollapsed}
               onToggle={() => setIsDoctorsPanelCollapsed((prev) => !prev)}
+              onBookDoctor={handleBookDoctor}
             />
           </div>
 
@@ -431,22 +618,45 @@ export default function Dashboard() {
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
 
-            {doctors.map((doc) => (
-              <Marker key={doc.id} position={[doc.lat, doc.lng]}>
-                <Popup>
-                  <div className="text-sm">
-                    <p className="font-bold">{doc.name}</p>
-                    <p className="text-blue-600">{doc.specialty}</p>
-                    <p className="mt-1 text-xs text-slate-500">{doc.address}</p>
-                  </div>
-                </Popup>
-              </Marker>
-            ))}
+            {doctors.map((doc) => {
+              let markerLat = doc.lat;
+              let markerLng = doc.lng;
+              if (!markerLat || !markerLng || (markerLat === 0 && markerLng === 0)) {
+                const fallback = CITY_COORDS[mapCity] || mapCenter;
+                markerLat = fallback[0];
+                markerLng = fallback[1];
+              }
+              return (
+                <Marker key={doc.id} position={[markerLat, markerLng]}>
+                  <Popup>
+                    <div className="text-sm">
+                      <p className="font-bold">{doc.name}</p>
+                      <p className="text-blue-600">{doc.specialty}</p>
+                      <p className="mt-1 text-xs text-slate-500">{doc.address}</p>
+                      <button
+                        onClick={() => handleBookDoctor(doc)}
+                        className="mt-2 w-full rounded bg-blue-600 px-2 py-1.5 text-xs font-bold text-white transition hover:bg-blue-700"
+                      >
+                        Book Now
+                      </button>
+                    </div>
+                  </Popup>
+                </Marker>
+              );
+            })}
 
             <RecenterMap coords={mapCenter} />
           </MapContainer>
         </section>
       </main>
+
+      {/* Modals placed outside main structural layout */}
+      <BookingModal 
+        isOpen={isModalOpen} 
+        onClose={() => setIsModalOpen(false)} 
+        doctor={selectedDoctor} 
+        onConfirm={handleConfirmBooking} 
+      />
     </div>
   );
 }

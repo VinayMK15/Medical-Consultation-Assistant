@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from services.translator_logic import detect_and_translate_to_english, translate_from_english
-from services.nlp_processor import extract_medical_info
+from services.nlp_processor import extract_medical_info, normalize_city
 import models
 import schemas
 from database import engine, get_db
@@ -33,37 +33,107 @@ sessions: dict = {}
 # ---------------------------------------------------------------------------
 SYMPTOM_SPECIALIST_MAP = {
     # Cardiology
-    "chest pain":       "Cardiologist",
-    "heart pain":       "Cardiologist",
-    "palpitations":     "Cardiologist",
-    "heart attack":     "Cardiologist",
+    "chest pain":           "Cardiologist",
+    "heart pain":           "Cardiologist",
+    "palpitations":         "Cardiologist",
+    "heart attack":         "Cardiologist",
+    "chest tightness":      "Cardiologist",
     # Neurology
-    "headache":         "Neurologist",
-    "migraine":         "Neurologist",
-    "seizure":          "Neurologist",
-    "dizziness":        "Neurologist",
+    "headache":             "Neurologist",
+    "migraine":             "Neurologist",
+    "seizure":              "Neurologist",
+    "dizziness":            "Neurologist",
+    "numbness":             "Neurologist",
+    "stroke":               "Neurologist",
     # Pulmonology
-    "cough":            "Pulmonologist",
-    "shortness of breath": "Pulmonologist",
-    "breathing":        "Pulmonologist",
-    "asthma":           "Pulmonologist",
-    # Internal Medicine / General
-    "nausea":           "Internal Medicine",
-    "nauseous":         "Internal Medicine",
-    "stomach pain":     "Internal Medicine",
-    "abdominal pain":   "Internal Medicine",
-    "vomiting":         "Internal Medicine",
-    "fever":            "General Physician",
-    "cold":             "General Physician",
-    "flu":              "General Physician",
-    "fatigue":          "General Physician",
-    "weakness":         "General Physician",
+    "cough":                "Pulmonologist",
+    "shortness of breath":  "Pulmonologist",
+    "breathing":            "Pulmonologist",
+    "asthma":               "Pulmonologist",
+    "wheezing":             "Pulmonologist",
+    # Internal Medicine
+    "nausea":               "Internal Medicine",
+    "nauseous":             "Internal Medicine",
+    "stomach pain":         "Internal Medicine",
+    "abdominal pain":       "Internal Medicine",
+    "vomiting":             "Internal Medicine",
+    # General Physician
+    "fever":                "General Physician",
+    "cold":                 "General Physician",
+    "flu":                  "General Physician",
+    "fatigue":              "General Physician",
+    "weakness":             "General Physician",
+    # Orthopedics
+    "broken arm":           "Orthopedist",
+    "broke my arm":         "Orthopedist",
+    "fracture":             "Orthopedist",
+    "broken bone":          "Orthopedist",
+    "bone pain":            "Orthopedist",
+    "joint pain":           "Orthopedist",
+    "knee pain":            "Orthopedist",
+    "back pain":            "Orthopedist",
+    "sprain":               "Orthopedist",
+    "broken leg":           "Orthopedist",
+    # Dermatology
+    "rash":                 "Dermatologist",
+    "skin rash":            "Dermatologist",
+    "acne":                 "Dermatologist",
+    "eczema":               "Dermatologist",
+    "psoriasis":            "Dermatologist",
+    "itching":              "Dermatologist",
+    "skin infection":       "Dermatologist",
+    # Pediatrics
+    "child fever":          "Pediatrician",
+    "infant":               "Pediatrician",
+    "baby":                 "Pediatrician",
+    "child rash":           "Pediatrician",
+    # Psychiatry
+    "anxiety":              "Psychiatrist",
+    "depression":           "Psychiatrist",
+    "panic attack":         "Psychiatrist",
+    "mental health":        "Psychiatrist",
+    "insomnia":             "Psychiatrist",
+    "stress":               "Psychiatrist",
+    # Gastroenterology
+    "diarrhea":             "Gastroenterologist",
+    "constipation":         "Gastroenterologist",
+    "bloating":             "Gastroenterologist",
+    "acid reflux":          "Gastroenterologist",
+    "heartburn":            "Gastroenterologist",
+    "ibs":                  "Gastroenterologist",
+    # Endocrinology
+    "diabetes":             "Endocrinologist",
+    "thyroid":              "Endocrinologist",
+    "weight gain":          "Endocrinologist",
+    "hormonal":             "Endocrinologist",
+    # Ophthalmology
+    "eye pain":             "Ophthalmologist",
+    "blurry vision":        "Ophthalmologist",
+    "vision loss":          "Ophthalmologist",
+    "red eye":              "Ophthalmologist",
+    # ENT
+    "ear pain":             "ENT Specialist",
+    "hearing loss":         "ENT Specialist",
+    "sore throat":          "ENT Specialist",
+    "nose bleed":           "ENT Specialist",
+    "sinusitis":            "ENT Specialist",
+    "tonsils":              "ENT Specialist",
+    # Urology
+    "urinary pain":         "Urologist",
+    "kidney stone":         "Urologist",
+    "frequent urination":   "Urologist",
+    # Oncology
+    "cancer":               "Oncologist",
+    "tumor":                "Oncologist",
+    "lump":                 "Oncologist",
 }
 
 # Specialty strings we recognise (used as fallback label)
 _KNOWN_SPECIALTIES = {
-    "Cardiologist", "General Physician", "Neurologist",
-    "Pulmonologist", "Internal Medicine",
+    "Cardiologist", "General Physician", "Neurologist", "Pulmonologist",
+    "Internal Medicine", "Dermatologist", "Orthopedist", "Pediatrician",
+    "Psychiatrist", "Gastroenterologist", "Endocrinologist", "Ophthalmologist",
+    "ENT Specialist", "Urologist", "Oncologist",
 }
 
 
@@ -109,13 +179,70 @@ def find_doctors(city: str | None, area: str | None, specialist: str, db: Sessio
         return q.filter(or_(*conditions))
 
     def to_dict(doc: User) -> dict:
+        lat = float(doc.lat) if doc.lat else 0.0
+        lng = float(doc.lng) if doc.lng else 0.0
+
+        if lat == 0.0 or lng == 0.0:
+            import random
+
+            # City-level coordinates
+            city_coords = {
+                "Bangalore": [12.9716, 77.5946],
+                "Mumbai":    [19.0760, 72.8777],
+                "Delhi":     [28.6139, 77.2090],
+                "Chennai":   [13.0827, 80.2707],
+                "Kolkata":   [22.5726, 88.3639],
+                "Hyderabad": [17.3850, 78.4867],
+                "Pune":      [18.5204, 73.8567],
+                "London":    [51.5074, -0.1278],
+                "New York":  [40.7128, -74.0060],
+            }
+
+            # Bangalore area / neighbourhood coords
+            area_coords = {
+                "Whitefield":       [12.9698, 77.7500],
+                "Koramangala":      [12.9279, 77.6271],
+                "Indiranagar":      [12.9784, 77.6408],
+                "Jayanagar":        [12.9308, 77.5838],
+                "Malleswaram":      [13.0035, 77.5667],
+                "HSR Layout":       [12.9116, 77.6389],
+                "BTM Layout":       [12.9166, 77.6101],
+                "Electronic City":  [12.8399, 77.6770],
+                "Marathahalli":     [12.9591, 77.6974],
+                "Hebbal":           [13.0354, 77.5972],
+                "Yelahanka":        [13.1007, 77.5963],
+                "Banashankari":     [12.9255, 77.5468],
+                "Bellandur":        [12.9257, 77.6745],
+                "Rajajinagar":      [12.9907, 77.5530],
+                "JP Nagar":         [12.9077, 77.5856],
+            }
+
+            # 1. Try to match the doctor's address to a known Bangalore area
+            doc_address = (doc.address or "").lower()
+            matched_area = next(
+                (coords for area, coords in area_coords.items() if area.lower() in doc_address),
+                None,
+            )
+
+            if matched_area:
+                base_lat, base_lng = matched_area
+            else:
+                # 2. Fall back to city-level
+                matched_key = next(
+                    (k for k in city_coords if k.lower() == (city or "").lower()), None
+                )
+                base_lat, base_lng = city_coords[matched_key] if matched_key else (12.9716, 77.5946)
+
+            lat = base_lat + random.uniform(-0.008, 0.008)
+            lng = base_lng + random.uniform(-0.008, 0.008)
+
         return {
             "id":        doc.id,
             "name":      doc.full_name or "Unknown Doctor",
             "specialty": doc.specialization or "General Physician",
             "address":   doc.address or city,
-            "lat":       float(doc.lat) if doc.lat else None,
-            "lng":       float(doc.lng) if doc.lng else None,
+            "lat":       lat,
+            "lng":       lng,
         }
 
     city_pool_q = location_filter(base_q)
@@ -169,7 +296,7 @@ def process_message(msg: UserMessage, db: Session = Depends(get_db)):
     if extracted["symptoms"]:
         session["symptoms"] = extracted["symptoms"]
     if extracted["city"]:
-        session["city"] = extracted["city"]
+        session["city"] = normalize_city(extracted["city"])
     if extracted["area"]:
         session["area"] = extracted["area"]
 
@@ -345,6 +472,7 @@ def get_doctor_appointments(
 @app.patch("/api/doctor/appointments/{appointment_id}/complete")
 def complete_appointment(
     appointment_id: int,
+    payload: schemas.AppointmentComplete,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -366,6 +494,7 @@ def complete_appointment(
         )
 
     appt.status = "Completed"
+    appt.prescription_notes = payload.prescription_notes
     db.commit()
     db.refresh(appt)
     return {"message": "Appointment marked as completed.", "appointment_id": appt.id}
@@ -409,6 +538,33 @@ def get_patient_appointments(
         })
 
     return result
+
+
+@app.post("/api/appointments", status_code=status.HTTP_201_CREATED)
+def create_appointment(
+    appointment: schemas.AppointmentCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Only patients can book appointments."
+        )
+
+    new_appointment = Appointment(
+        patient_id=current_user.id,
+        doctor_id=appointment.doctor_id,
+        appointment_time=appointment.appointment_time,
+        symptoms_summary=appointment.symptoms_summary,
+        status="Pending"
+    )
+    
+    db.add(new_appointment)
+    db.commit()
+    db.refresh(new_appointment)
+    
+    return new_appointment
 
 
 # ---------------------------------------------------------------------------
@@ -456,3 +612,28 @@ def verify_doctor(
     db.refresh(doctor)
 
     return {"message": f"Doctor '{doctor.full_name}' has been verified successfully.", "doctor_id": doctor.id}
+
+
+@app.delete("/api/admin/reject-doctor/{doctor_id}")
+def reject_doctor(
+    doctor_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Admin portal only."
+        )
+
+    doctor = db.query(User).filter(User.id == doctor_id, User.role == "doctor").first()
+    if not doctor:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found."
+        )
+
+    db.delete(doctor)
+    db.commit()
+
+    return {"message": f"Doctor '{doctor.full_name}' has been rejected and removed.", "doctor_id": doctor_id}

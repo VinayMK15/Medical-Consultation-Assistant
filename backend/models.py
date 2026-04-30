@@ -31,3 +31,4 @@ class Appointment(Base):
     appointment_time = Column(DateTime)
     symptoms_summary = Column(String)
     status = Column(String, default="Pending")
+    prescription_notes = Column(String, nullable=True)

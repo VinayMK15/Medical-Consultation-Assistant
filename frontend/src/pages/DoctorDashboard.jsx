@@ -41,22 +41,33 @@ function StatusBadge({ status }) {
 }
 
 function QueueCard({ appt, isSelected, onClick }) {
+  const isCompleted = appt.status === 'Completed';
   return (
     <button
       onClick={onClick}
       className={`w-full rounded-xl border p-4 text-left transition ${
         isSelected
           ? 'border-indigo-300 bg-indigo-50 shadow-sm'
+          : isCompleted
+          ? 'border-slate-100 bg-slate-50 opacity-60 hover:opacity-80'
           : 'border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50'
       }`}
     >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-3 min-w-0">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-indigo-100 text-xs font-bold text-indigo-700">
+          <span
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+              isCompleted
+                ? 'bg-slate-100 text-slate-500'
+                : 'bg-indigo-100 text-indigo-700'
+            }`}
+          >
             {initials(appt.patient_name)}
           </span>
           <div className="min-w-0">
-            <p className="truncate font-bold text-slate-800">{appt.patient_name || 'Unknown Patient'}</p>
+            <p className={`truncate font-bold ${isCompleted ? 'text-slate-500' : 'text-slate-800'}`}>
+              {appt.patient_name || 'Unknown Patient'}
+            </p>
             <p className="mt-0.5 truncate text-xs text-slate-400">{formatTime(appt.appointment_time)}</p>
           </div>
         </div>
@@ -76,10 +87,26 @@ function EmptyQueue() {
   );
 }
 
-function PatientDetail({ appt, onMarkComplete, completing }) {
+function WorkspaceEmpty() {
+  return (
+    <div className="flex h-full items-center justify-center py-20 text-center">
+      <div>
+        <p className="text-5xl">🩺</p>
+        <p className="mt-5 text-lg font-bold text-slate-700">Select a patient from the queue</p>
+        <p className="mt-2 text-sm text-slate-400">
+          Appointment details, AI summary, and prescription workspace will appear here.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function PatientDetail({ appt, prescriptionNotes, onNotesChange, onMarkComplete, completing }) {
+  const isCompleted = appt.status === 'Completed';
+
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
+      {/* Patient Header */}
       <div className="border-b border-slate-100 px-7 py-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4">
@@ -103,30 +130,63 @@ function PatientDetail({ appt, onMarkComplete, completing }) {
         </div>
       </div>
 
-      {/* AI Summary */}
-      <div className="flex-1 overflow-y-auto px-7 py-6">
+      {/* Scrollable body */}
+      <div className="flex-1 overflow-y-auto px-7 py-6 space-y-6">
+        {/* AI Summary */}
         <div className="rounded-2xl border border-blue-100 bg-blue-50 p-6">
           <p className="mb-3 text-xs font-bold uppercase tracking-[0.18em] text-blue-700">
             AI Pre-Consultation Summary
           </p>
-          <p className="leading-7 text-slate-700">{appt.symptoms_summary}</p>
+          <p className="leading-7 text-slate-700">{appt.symptoms_summary || 'No summary provided.'}</p>
+        </div>
+
+        {/* Prescription / Consultation Notes */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <label
+            htmlFor={`notes-${appt.id}`}
+            className="mb-3 block text-xs font-bold uppercase tracking-[0.18em] text-slate-500"
+          >
+            Prescription / Consultation Notes
+          </label>
+
+          {isCompleted ? (
+            // Read-only view for completed appointments
+            <div className="min-h-[120px] rounded-xl border border-slate-100 bg-slate-50 p-4 text-sm leading-7 text-slate-600 whitespace-pre-wrap">
+              {appt.prescription_notes || (
+                <span className="italic text-slate-400">No prescription notes were recorded.</span>
+              )}
+            </div>
+          ) : (
+            <textarea
+              id={`notes-${appt.id}`}
+              rows={6}
+              value={prescriptionNotes}
+              onChange={(e) => onNotesChange(e.target.value)}
+              placeholder="Enter diagnosis, prescribed medications, dosage, follow-up instructions..."
+              className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-7 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-100"
+            />
+          )}
         </div>
       </div>
 
-      {/* Actions */}
-      <div className="border-t border-slate-100 bg-slate-50 px-7 py-5 flex justify-end gap-3 rounded-b-2xl">
-        <button className="rounded-xl border border-slate-200 bg-white px-5 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-100">
-          Generate PDF Report
-        </button>
-        {appt.status !== 'Completed' && (
-          <button
-            onClick={onMarkComplete}
-            disabled={completing}
-            className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-70"
-          >
-            {completing ? 'Saving...' : 'Mark as Completed'}
-          </button>
-        )}
+      {/* Footer Actions */}
+      <div className="border-t border-slate-100 bg-slate-50 px-7 py-5 flex items-center justify-between rounded-b-2xl">
+        <p className="text-xs text-slate-400">
+          {isCompleted
+            ? 'This appointment has been closed.'
+            : 'Notes are saved when you mark as completed.'}
+        </p>
+        <div className="flex gap-3">
+          {!isCompleted && (
+            <button
+              onClick={onMarkComplete}
+              disabled={completing}
+              className="rounded-xl bg-indigo-600 px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-200 disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {completing ? 'Saving...' : 'Mark as Completed'}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -139,11 +199,14 @@ export default function DoctorDashboard() {
   const navigate = useNavigate();
 
   const [appointments, setAppointments] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [activeAppointment, setActiveAppointment] = useState(null);
+  const [prescriptionNotes, setPrescriptionNotes] = useState('');
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState('');
   const [completing, setCompleting] = useState(false);
+  const [successMsg, setSuccessMsg] = useState('');
 
+  // Fetch appointments on mount
   useEffect(() => {
     const load = async () => {
       setLoading(true);
@@ -151,7 +214,9 @@ export default function DoctorDashboard() {
       try {
         const res = await api.get('/api/doctor/appointments');
         setAppointments(res.data);
-        if (res.data.length > 0) setSelected(res.data[0]);
+        // Auto-select the first pending appointment
+        const firstPending = res.data.find((a) => a.status !== 'Completed');
+        if (firstPending) setActiveAppointment(firstPending);
       } catch (err) {
         setApiError(err.response?.data?.detail || 'Failed to load appointments.');
       } finally {
@@ -161,16 +226,36 @@ export default function DoctorDashboard() {
     load();
   }, []);
 
+  // Reset prescription notes whenever a different appointment is selected
+  const handleSelectAppointment = (appt) => {
+    setActiveAppointment(appt);
+    // Pre-fill with existing notes if already completed
+    setPrescriptionNotes(appt.prescription_notes || '');
+    setSuccessMsg('');
+    setApiError('');
+  };
+
   const handleMarkComplete = async () => {
-    if (!selected) return;
+    if (!activeAppointment) return;
     setCompleting(true);
+    setApiError('');
     try {
-      await api.patch(`/api/doctor/appointments/${selected.id}/complete`);
+      await api.patch(`/api/doctor/appointments/${activeAppointment.id}/complete`, {
+        prescription_notes: prescriptionNotes,
+      });
+
+      // Update local state — mark as completed and store the notes
       const updated = appointments.map((a) =>
-        a.id === selected.id ? { ...a, status: 'Completed' } : a
+        a.id === activeAppointment.id
+          ? { ...a, status: 'Completed', prescription_notes: prescriptionNotes }
+          : a
       );
       setAppointments(updated);
-      setSelected((prev) => ({ ...prev, status: 'Completed' }));
+
+      // Show success, then clear the workspace
+      setSuccessMsg(`Appointment with ${activeAppointment.patient_name} marked as completed.`);
+      setActiveAppointment(null);
+      setPrescriptionNotes('');
     } catch (err) {
       setApiError(err.response?.data?.detail || 'Failed to update appointment.');
     } finally {
@@ -202,14 +287,20 @@ export default function DoctorDashboard() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <span className="rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-700">
-              {pendingCount} pending
+            <span
+              className={`rounded-full border px-3 py-1 text-xs font-bold ${
+                pendingCount > 0
+                  ? 'border-amber-200 bg-amber-50 text-amber-700'
+                  : 'border-green-200 bg-green-50 text-green-700'
+              }`}
+            >
+              {pendingCount > 0 ? `${pendingCount} pending` : 'All clear'}
             </span>
             <div className="flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5">
               <span className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-600 text-xs font-bold uppercase text-white">
                 {doctorName.charAt(0)}
               </span>
-              <span className="text-sm font-semibold text-slate-700">{doctorName}</span>
+              <span className="text-sm font-semibold text-slate-700">Dr. {doctorName}</span>
             </div>
             <button
               onClick={handleLogout}
@@ -221,24 +312,33 @@ export default function DoctorDashboard() {
         </div>
       </header>
 
-      {/* Error Banner */}
-      {apiError && (
-        <div className="mx-auto mt-4 max-w-7xl px-5 lg:px-8">
-          <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
+      {/* Banners */}
+      <div className="mx-auto max-w-7xl px-5 lg:px-8">
+        {apiError && (
+          <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
             <span className="font-bold">Error:</span> {apiError}
           </div>
-        </div>
-      )}
+        )}
+        {successMsg && (
+          <div className="mt-4 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-700">
+            ✅ {successMsg}
+          </div>
+        )}
+      </div>
 
       {/* Main Layout */}
       <main className="mx-auto max-w-7xl px-5 py-6 lg:px-8">
         {loading ? (
           <div className="flex h-64 items-center justify-center">
-            <p className="text-sm font-semibold text-slate-400">Loading appointments...</p>
+            <div className="text-center">
+              <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />
+              <p className="text-sm font-semibold text-slate-400">Loading appointments...</p>
+            </div>
           </div>
         ) : (
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]">
-            {/* Queue */}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-[320px_1fr]" style={{ minHeight: 'calc(100vh - 160px)' }}>
+
+            {/* ── Left: Patient Queue ── */}
             <div className="flex flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
               <div className="border-b border-slate-100 px-5 py-4">
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-indigo-600">Patient queue</p>
@@ -256,8 +356,8 @@ export default function DoctorDashboard() {
                       <QueueCard
                         key={appt.id}
                         appt={appt}
-                        isSelected={selected?.id === appt.id}
-                        onClick={() => setSelected(appt)}
+                        isSelected={activeAppointment?.id === appt.id}
+                        onClick={() => handleSelectAppointment(appt)}
                       />
                     ))}
                   </div>
@@ -265,24 +365,21 @@ export default function DoctorDashboard() {
               </div>
             </div>
 
-            {/* Detail Panel */}
-            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm min-h-[480px]">
-              {!selected ? (
-                <div className="flex h-full items-center justify-center py-20 text-center">
-                  <div>
-                    <p className="text-4xl">🩺</p>
-                    <p className="mt-4 font-bold text-slate-600">Select a patient from the queue</p>
-                    <p className="mt-2 text-sm text-slate-400">Appointment details and AI summary will appear here.</p>
-                  </div>
-                </div>
+            {/* ── Right: Workspace ── */}
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+              {!activeAppointment ? (
+                <WorkspaceEmpty />
               ) : (
                 <PatientDetail
-                  appt={selected}
+                  appt={activeAppointment}
+                  prescriptionNotes={prescriptionNotes}
+                  onNotesChange={setPrescriptionNotes}
                   onMarkComplete={handleMarkComplete}
                   completing={completing}
                 />
               )}
             </div>
+
           </div>
         )}
       </main>

@@ -44,6 +44,10 @@ class AppointmentCreate(BaseModel):
     symptoms_summary: str
 
 
+class AppointmentComplete(BaseModel):
+    prescription_notes: Optional[str] = None
+
+
 class AppointmentResponse(BaseModel):
     id: int
     patient_id: int
@@ -51,6 +55,7 @@ class AppointmentResponse(BaseModel):
     appointment_time: datetime
     symptoms_summary: str
     status: str
+    prescription_notes: Optional[str] = None
     patient_name: Optional[str] = None
     patient_email: Optional[str] = None
 
