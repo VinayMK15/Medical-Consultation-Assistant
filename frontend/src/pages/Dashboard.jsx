@@ -36,7 +36,7 @@ function RecenterMap({ coords }) {
   return null;
 }
 
-function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDoctor }) {
+function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDoctor, bookedDoctorId }) {
   const title = doctors.length > 0 ? `${doctors.length} doctors near ${city}` : 'No matches yet';
 
   if (isCollapsed) {
@@ -87,26 +87,59 @@ function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDocto
           </div>
         ) : (
           <div className="space-y-2">
-            {doctors.map((doc, index) => (
-              <div key={doc.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
-                <div className="flex items-start gap-3 min-w-0">
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
-                    {index + 1}
-                  </span>
-                  <div className="min-w-0">
-                    <p className="font-bold text-slate-900">{doc.name}</p>
-                    <p className="mt-1 text-xs font-bold uppercase tracking-wide text-blue-600">{doc.specialty}</p>
-                    <p className="mt-2 text-xs leading-5 text-slate-500">{doc.address}</p>
+            {doctors.map((doc, index) => {
+              const isThisDoctorBooked = bookedDoctorId === doc.id;
+              const isSearchLocked = bookedDoctorId !== null;
+
+              return (
+                <div key={doc.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+                      {index + 1}
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-900">{doc.name}</p>
+                      <p className="mt-1 text-xs font-bold uppercase tracking-wide text-blue-600">{doc.specialty}</p>
+                      <p className="mt-2 text-xs leading-5 text-slate-500">{doc.address}</p>
+                      {Boolean(doc.distance_km && doc.distance_km > 0) && (
+                        <span
+                          style={{
+                            fontSize: "12px",
+                            color: "#1D9E75",
+                            fontWeight: "500",
+                            marginTop: "4px",
+                            display: "block",
+                          }}
+                        >
+                          📍 {doc.distance_km} km away
+                        </span>
+                      )}
+                    </div>
                   </div>
+                  {isThisDoctorBooked ? (
+                    <span className="shrink-0 rounded-lg border border-green-200 bg-green-100 px-3 py-1.5 text-xs font-bold text-green-700 shadow-sm flex items-center gap-1">
+                      ✓ Booked
+                    </span>
+                  ) : isSearchLocked ? (
+                    <button
+                      disabled
+                      type="button"
+                      title="You have already booked a doctor for this search entry."
+                      className="shrink-0 rounded-lg border border-slate-200 bg-slate-200/80 px-3 py-1.5 text-xs font-semibold text-slate-400 cursor-not-allowed opacity-80"
+                    >
+                      1 Booked Max
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => onBookDoctor(doc)}
+                      className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                    >
+                      Book Now
+                    </button>
+                  )}
                 </div>
-                <button
-                  onClick={() => onBookDoctor(doc)}
-                  className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
-                >
-                  Book Now
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -239,10 +272,59 @@ function getOrCreateSessionId(userEmail) {
 }
 
 function BookingModal({ isOpen, onClose, doctor, onConfirm }) {
-  const [date, setDate] = useState('');
-  const [time, setTime] = useState('');
+  const [selectedDate, setSelectedDate] = useState('');
+  const [availableSlots, setAvailableSlots] = useState([]);
+  const [allSlots, setAllSlots] = useState([]);
+  const [selectedSlot, setSelectedSlot] = useState('');
   const [symptoms, setSymptoms] = useState('');
+  const [isLoadingSlots, setIsLoadingSlots] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [slotError, setSlotError] = useState('');
+  const [validationMsg, setValidationMsg] = useState('');
+
+  // Reset everything when doctor changes or modal opens/closes
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedDate('');
+      setAvailableSlots([]);
+      setAllSlots([]);
+      setSelectedSlot('');
+      setSymptoms('');
+      setSlotError('');
+      setValidationMsg('');
+    }
+  }, [isOpen, doctor?.id]);
+
+  // Fetch available slots whenever date changes
+  useEffect(() => {
+    if (!selectedDate || !doctor?.id) {
+      setAvailableSlots([]);
+      setAllSlots([]);
+      setSelectedSlot('');
+      return;
+    }
+
+    const fetchSlots = async () => {
+      setIsLoadingSlots(true);
+      setSlotError('');
+      setSelectedSlot('');
+      try {
+        const res = await api.get('/api/appointments/available-slots', {
+          params: { doctor_id: doctor.id, date: selectedDate },
+        });
+        setAvailableSlots(res.data.available_slots || []);
+        setAllSlots(res.data.all_slots || res.data.available_slots || []);
+      } catch (err) {
+        setSlotError(err.response?.data?.detail || 'Failed to load available slots.');
+        setAvailableSlots([]);
+        setAllSlots([]);
+      } finally {
+        setIsLoadingSlots(false);
+      }
+    };
+
+    fetchSlots();
+  }, [selectedDate, doctor?.id]);
 
   if (!isOpen) return null;
 
@@ -254,35 +336,62 @@ function BookingModal({ isOpen, onClose, doctor, onConfirm }) {
     .join('')
     .toUpperCase() || 'DR';
 
+  /** Format "HH:MM" → "9:00 AM" */
+  const formatTo12h = (time24) => {
+    const [h, m] = time24.split(':').map(Number);
+    const suffix = h >= 12 ? 'PM' : 'AM';
+    const display = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    return `${display}:${String(m).padStart(2, '0')} ${suffix}`;
+  };
+
+  /** Format "YYYY-MM-DD" → "Mon, May 19" */
+  const formatDateDisplay = (dateStr) => {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + 'T00:00:00');
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!date || !time) return;
+    setValidationMsg('');
+
+    if (!selectedDate) {
+      setValidationMsg('Please select a date.');
+      return;
+    }
+    if (!selectedSlot) {
+      setValidationMsg('Please select a time slot.');
+      return;
+    }
+
     setIsSubmitting(true);
     try {
-      const appointmentTime = new Date(`${date}T${time}`).toISOString();
       await onConfirm({
         doctor_id: doctor.id,
-        appointment_time: appointmentTime,
+        appointment_date: selectedDate,
+        slot_time: selectedSlot,
         symptoms_summary: symptoms.trim() || 'Routine Checkup',
       });
-      // Reset fields on success (parent handles close)
-      setDate('');
-      setTime('');
-      setSymptoms('');
+    } catch (err) {
+      // Show the error message inside the modal
+      const detail = err?.response?.data?.detail || err?.message || 'Booking failed. Please try again.';
+      setValidationMsg(typeof detail === 'string' ? detail : JSON.stringify(detail));
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  const today = new Date().toISOString().split('T')[0];
 
   return (
     <div
       className="fixed inset-0 z-[2000] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm px-4"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl">
+      <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
 
         {/* ── Header ── */}
-        <div className="flex items-center gap-4 border-b border-slate-100 px-6 py-5">
+        <div className="flex items-center gap-4 border-b border-slate-100 px-6 py-5 shrink-0">
           <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-blue-100 text-lg font-bold text-blue-700">
             {doctorInitials}
           </div>
@@ -307,81 +416,192 @@ function BookingModal({ isOpen, onClose, doctor, onConfirm }) {
           </button>
         </div>
 
-        {/* ── Form ── */}
-        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-5">
+        {/* ── Form (scrollable body) ── */}
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+          <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
 
-          {/* Date + Time in 2-column grid */}
-          <div className="grid grid-cols-2 gap-4">
+            {/* Step 1 — Date Picker */}
             <div>
-              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
-                Date
+              <label
+                htmlFor="booking-date"
+                className="mb-1.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-500"
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-blue-100 text-[10px] font-bold text-blue-700">1</span>
+                Select Date
               </label>
               <input
+                id="booking-date"
                 type="date"
                 required
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                min={new Date().toISOString().split('T')[0]}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                min={today}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
               />
+              {selectedDate && (
+                <p className="mt-1.5 text-xs text-slate-400">{formatDateDisplay(selectedDate)}</p>
+              )}
             </div>
+
+            {/* Step 2 — Slot Grid */}
             <div>
-              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
-                Time
+              <label className="mb-1.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-500">
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-blue-100 text-[10px] font-bold text-blue-700">2</span>
+                Select Time Slot
               </label>
-              <input
-                type="time"
-                required
-                value={time}
-                onChange={(e) => setTime(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-900 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+
+              {!selectedDate ? (
+                /* No date selected yet */
+                <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center">
+                  <p className="text-2xl">📅</p>
+                  <p className="mt-2 text-sm font-medium text-slate-400">Pick a date first to see available slots</p>
+                </div>
+              ) : isLoadingSlots ? (
+                /* Loading spinner */
+                <div className="flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 py-8">
+                  <div className="text-center">
+                    <div className="mx-auto mb-3 h-6 w-6 animate-spin rounded-full border-[3px] border-blue-200 border-t-blue-600" />
+                    <p className="text-xs font-semibold text-slate-400">Loading available slots…</p>
+                  </div>
+                </div>
+              ) : slotError ? (
+                /* Fetch error */
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-center">
+                  <p className="text-sm font-medium text-red-600">{slotError}</p>
+                </div>
+              ) : (allSlots.length === 0 && availableSlots.length === 0) ? (
+                /* Doctor fully booked or no slots */
+                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-8 text-center">
+                  <p className="text-2xl">😔</p>
+                  <p className="mt-2 text-sm font-bold text-amber-700">No available slots on this date</p>
+                  <p className="mt-1 text-xs text-amber-600">The doctor is fully booked or not working. Please select another date.</p>
+                </div>
+              ) : (
+                /* Slot pill grid */
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                        {availableSlots.length} available
+                      </span>
+                      {allSlots.length - availableSlots.length > 0 && (
+                        <span className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-bold text-red-600 border border-red-100">
+                          {allSlots.length - availableSlots.length} booked
+                        </span>
+                      )}
+                    </div>
+                    {selectedSlot && (
+                      <span className="rounded-full bg-blue-100 px-2.5 py-0.5 text-[11px] font-bold text-blue-700">
+                        Selected: {formatTo12h(selectedSlot)}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+                    {(allSlots.length > 0 ? allSlots : availableSlots).map((slot) => {
+                      const isAvailable = availableSlots.includes(slot);
+                      if (!isAvailable) {
+                        return (
+                          <div
+                            key={slot}
+                            title="This slot is already booked"
+                            className="flex flex-col items-center justify-center rounded-lg border border-slate-200 bg-slate-100/90 px-2 py-2 text-center text-slate-400 opacity-75 cursor-not-allowed select-none"
+                          >
+                            <span className="text-xs font-semibold line-through text-slate-400">{formatTo12h(slot)}</span>
+                            <span className="mt-0.5 rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-extrabold uppercase tracking-tight text-red-600">
+                              Booked
+                            </span>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <button
+                          key={slot}
+                          type="button"
+                          onClick={() => {
+                            setSelectedSlot(slot);
+                            setValidationMsg('');
+                          }}
+                          className={`rounded-lg border px-3 py-2.5 text-xs font-bold transition ${
+                            selectedSlot === slot
+                              ? 'border-blue-400 bg-blue-600 text-white shadow-md shadow-blue-500/20 scale-[1.02]'
+                              : 'border-slate-200 bg-white text-slate-700 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700'
+                          }`}
+                        >
+                          {formatTo12h(slot)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Step 3 — Symptoms */}
+            <div>
+              <label
+                htmlFor="booking-symptoms"
+                className="mb-1.5 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-500"
+              >
+                <span className="flex h-5 w-5 items-center justify-center rounded-md bg-blue-100 text-[10px] font-bold text-blue-700">3</span>
+                Reason for Visit
+                <span className="normal-case font-medium text-slate-400">(Optional)</span>
+              </label>
+              <textarea
+                id="booking-symptoms"
+                rows={3}
+                value={symptoms}
+                onChange={(e) => setSymptoms(e.target.value)}
+                placeholder="Briefly describe your symptoms or reason for the visit..."
+                className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
               />
             </div>
           </div>
 
-          {/* Symptoms / Reason */}
-          <div>
-            <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-slate-500">
-              Reason for Visit <span className="normal-case font-medium text-slate-400">(Optional)</span>
-            </label>
-            <textarea
-              rows={3}
-              value={symptoms}
-              onChange={(e) => setSymptoms(e.target.value)}
-              placeholder="Briefly describe your symptoms or reason for the visit..."
-              className="w-full resize-none rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-            />
-          </div>
+          {/* ── Footer Actions ── */}
+          <div className="border-t border-slate-100 px-6 py-4 shrink-0">
+            {validationMsg && (
+              <p className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs font-medium text-red-600">
+                ⚠ {validationMsg}
+              </p>
+            )}
 
-          {/* Actions */}
-          <div className="flex items-center justify-between border-t border-slate-100 pt-4">
-            <p className="text-xs text-slate-400">You can cancel any time before the appointment.</p>
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={isSubmitting}
-                className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={isSubmitting || !date || !time}
-                className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2 text-sm font-bold text-white shadow-md shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                {isSubmitting ? (
-                  <>
-                    <svg className="h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    Confirming...
-                  </>
-                ) : (
-                  'Confirm Booking'
-                )}
-              </button>
+            {/* Booking Summary */}
+            {selectedDate && selectedSlot && (
+              <div className="mb-3 flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2">
+                <span className="text-sm">📋</span>
+                <p className="text-xs font-semibold text-blue-800">
+                  {formatDateDisplay(selectedDate)} at {formatTo12h(selectedSlot)} with {doctor?.name}
+                </p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-400">You can cancel before the appointment.</p>
+              <div className="flex gap-3">
+                <button
+                  type="button"
+                  onClick={onClose}
+                  disabled={isSubmitting}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-bold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !selectedDate || !selectedSlot}
+                  className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Confirming…
+                    </>
+                  ) : (
+                    'Confirm Booking'
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </form>
@@ -412,8 +632,60 @@ export default function Dashboard() {
 
   const [selectedDoctor, setSelectedDoctor] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [bookedDoctorId, setBookedDoctorId] = useState(null);
+
+  const [locationMode, setLocationMode]       = useState('chat'); // 'home' | 'gps' | 'chat'
+  const [homeCoords, setHomeCoords]           = useState(null);
+  const [homeLabel, setHomeLabel]             = useState('');
+  const [patientCoords, setPatientCoords]     = useState(null);
+  const [locationStatus, setLocationStatus]   = useState('');
+
+  // Load patient home location from profile on mount
+  useEffect(() => {
+    api.get('/api/patient/profile').then((res) => {
+      const profile = res.data;
+      if (profile && profile.city) {
+        setHomeLabel(
+          profile.address
+            ? `${profile.address}, ${profile.city}`
+            : profile.city
+        );
+        if (profile.lat && profile.lng) {
+          setHomeCoords({ lat: parseFloat(profile.lat), lng: parseFloat(profile.lng) });
+        } else {
+          const cityCoord = CITY_COORDS[profile.city];
+          if (cityCoord) {
+            setHomeCoords({ lat: cityCoord[0], lng: cityCoord[1] });
+          }
+        }
+      }
+    }).catch(() => {});
+  }, []);
+
+  const handleGetLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationStatus('Geolocation not supported by your browser');
+      return;
+    }
+    setLocationStatus('Detecting...');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setPatientCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setLocationStatus('📍 Live location ready');
+        setMapCenter([pos.coords.latitude, pos.coords.longitude]);
+      },
+      () => {
+        setLocationStatus('Could not detect — check browser permissions');
+        setPatientCoords(null);
+      },
+      { timeout: 8000 }
+    );
+  };
 
   const handleBookDoctor = (doctor) => {
+    if (bookedDoctorId) {
+      return;
+    }
     setSelectedDoctor(doctor);
     setIsModalOpen(true);
   };
@@ -422,6 +694,9 @@ export default function Dashboard() {
     try {
       await api.post('/api/appointments', payload);
       setIsModalOpen(false);
+      if (selectedDoctor?.id) {
+        setBookedDoctorId(selectedDoctor.id);
+      }
       setSelectedDoctor(null);
       // Add a success message to chat instead of a blocking alert
       setMessages((prev) => [
@@ -433,7 +708,8 @@ export default function Dashboard() {
       ]);
     } catch (error) {
       console.error('Failed to book appointment:', error);
-      throw error; // Re-throw so the modal's isSubmitting resets correctly
+      // Re-throw with the original error so the modal can display the detail
+      throw error;
     }
   };
 
@@ -453,11 +729,23 @@ export default function Dashboard() {
     setMessages((prev) => [...prev, { sender: 'user', text: userText }]);
     setChatInput('');
     setIsRouting(true);
+    setBookedDoctorId(null); // Reset single booking lock for fresh search entry
+
+    // Resolve which coords to send based on active mode
+    const resolvedLat = locationMode === 'gps'  ? patientCoords?.lat
+                      : locationMode === 'home' ? homeCoords?.lat
+                      : null; // 'chat' mode — backend uses NLP or profile fallback
+
+    const resolvedLng = locationMode === 'gps'  ? patientCoords?.lng
+                      : locationMode === 'home' ? homeCoords?.lng
+                      : null;
 
     try {
       const response = await api.post('/process', {
         text: userText,
         session_id: sessionIdRef.current,
+        patient_lat: resolvedLat ?? null,
+        patient_lng: resolvedLng ?? null,
       });
       const data = response.data;
 
@@ -474,7 +762,10 @@ export default function Dashboard() {
         setMissingInfo(null);
       }
 
-      setDoctors(data.doctors || []);
+      const sorted = (data.doctors || []).sort((a, b) =>
+        (a.distance_km ?? Infinity) - (b.distance_km ?? Infinity)
+      );
+      setDoctors(sorted);
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -562,6 +853,67 @@ export default function Dashboard() {
               </span>
             </div>
 
+            {/* Location Mode Switcher */}
+            <div style={{
+              display: 'flex', gap: '8px',
+              marginBottom: '10px', flexWrap: 'wrap'
+            }}>
+              {/* Home Address Button */}
+              <button
+                type="button"
+                onClick={() => setLocationMode('home')}
+                disabled={!homeCoords}
+                style={{
+                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
+                  fontWeight: '500', cursor: homeCoords ? 'pointer' : 'not-allowed',
+                  border: '1px solid',
+                  borderColor: locationMode === 'home' ? '#1D9E75' : '#D1D5DB',
+                  background: locationMode === 'home' ? '#E1F5EE' : 'transparent',
+                  color:  locationMode === 'home' ? '#0F6E56' : '#6B7280',
+                  opacity: homeCoords ? 1 : 0.6
+                }}
+              >
+                🏠 {homeLabel || 'Home Address'}
+              </button>
+
+              {/* Live GPS Button */}
+              <button
+                type="button"
+                onClick={() => { setLocationMode('gps'); handleGetLocation(); }}
+                style={{
+                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
+                  fontWeight: '500', cursor: 'pointer', border: '1px solid',
+                  borderColor: locationMode === 'gps' ? '#1D9E75' : '#D1D5DB',
+                  background: locationMode === 'gps' ? '#E1F5EE' : 'transparent',
+                  color:  locationMode === 'gps' ? '#0F6E56' : '#6B7280',
+                }}
+              >
+                📍 {locationMode === 'gps' && patientCoords ? 'Live On' : 'Live Location'}
+              </button>
+
+              {/* Chat / Typed Location Button */}
+              <button
+                type="button"
+                onClick={() => setLocationMode('chat')}
+                style={{
+                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
+                  fontWeight: '500', cursor: 'pointer', border: '1px solid',
+                  borderColor: locationMode === 'chat' ? '#1D9E75' : '#D1D5DB',
+                  background: locationMode === 'chat' ? '#E1F5EE' : 'transparent',
+                  color:  locationMode === 'chat' ? '#0F6E56' : '#6B7280',
+                }}
+              >
+                💬 Typed Location
+              </button>
+
+              {/* Status message */}
+              {locationStatus && (
+                <span style={{ fontSize: '12px', color: '#9CA3AF', alignSelf: 'center' }}>
+                  {locationStatus}
+                </span>
+              )}
+            </div>
+
             <div className="flex items-end gap-3">
               <div className="flex-1 rounded-xl border border-slate-200 bg-slate-50 p-3 transition focus-within:border-blue-500 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
                 <textarea
@@ -609,6 +961,7 @@ export default function Dashboard() {
               isCollapsed={isDoctorsPanelCollapsed}
               onToggle={() => setIsDoctorsPanelCollapsed((prev) => !prev)}
               onBookDoctor={handleBookDoctor}
+              bookedDoctorId={bookedDoctorId}
             />
           </div>
 
@@ -626,6 +979,9 @@ export default function Dashboard() {
                 markerLat = fallback[0];
                 markerLng = fallback[1];
               }
+              const isThisDoctorBooked = bookedDoctorId === doc.id;
+              const isSearchLocked = bookedDoctorId !== null;
+
               return (
                 <Marker key={doc.id} position={[markerLat, markerLng]}>
                   <Popup>
@@ -633,12 +989,38 @@ export default function Dashboard() {
                       <p className="font-bold">{doc.name}</p>
                       <p className="text-blue-600">{doc.specialty}</p>
                       <p className="mt-1 text-xs text-slate-500">{doc.address}</p>
-                      <button
-                        onClick={() => handleBookDoctor(doc)}
-                        className="mt-2 w-full rounded bg-blue-600 px-2 py-1.5 text-xs font-bold text-white transition hover:bg-blue-700"
-                      >
-                        Book Now
-                      </button>
+                      {Boolean(doc.distance_km && doc.distance_km > 0) && (
+                        <span
+                          style={{
+                            fontSize: "12px",
+                            color: "#1D9E75",
+                            fontWeight: "500",
+                            marginTop: "4px",
+                            display: "block",
+                          }}
+                        >
+                          📍 {doc.distance_km} km away
+                        </span>
+                      )}
+                      {isThisDoctorBooked ? (
+                        <span className="mt-2 block w-full text-center rounded border border-green-200 bg-green-100 py-1 text-xs font-bold text-green-700">
+                          ✓ Booked
+                        </span>
+                      ) : isSearchLocked ? (
+                        <button
+                          disabled
+                          className="mt-2 w-full rounded border border-slate-200 bg-slate-200 py-1 text-xs font-semibold text-slate-400 cursor-not-allowed"
+                        >
+                          1 Booked Max
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleBookDoctor(doc)}
+                          className="mt-2 w-full rounded bg-blue-600 px-2 py-1.5 text-xs font-bold text-white transition hover:bg-blue-700"
+                        >
+                          Book Now
+                        </button>
+                      )}
                     </div>
                   </Popup>
                 </Marker>

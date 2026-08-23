@@ -1,5 +1,5 @@
 import React, { useState, useContext } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { AuthContext } from '../context/AuthContext';
 import ForgotPasswordModal from '../components/ForgotPasswordModal';
 
@@ -13,14 +13,18 @@ export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
   const [showForgotModal, setShowForgotModal] = useState(false);
 
   const { login, logout } = useContext(AuthContext);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isExpired = searchParams.get('expired') === 'true';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setLoading(true);
     try {
       const data = await login(email, password);
       const role = data?.user?.role;
@@ -33,18 +37,26 @@ export default function Login() {
         navigate('/');
       }
     } catch (err) {
-      if (err.response && err.response.data && err.response.data.detail) {
-        const detail = err.response.data.detail;
-        if (Array.isArray(detail)) {
-          setError(detail[0].msg);
-        } else if (typeof detail === 'string') {
-          setError(detail);
+      if (err.response && err.response.data) {
+        if (err.response.data.detail) {
+          const detail = err.response.data.detail;
+          if (Array.isArray(detail)) {
+            setError(detail[0].msg);
+          } else if (typeof detail === 'string') {
+            setError(detail);
+          } else {
+            setError(JSON.stringify(detail));
+          }
+        } else if (err.response.data.error) {
+          setError(err.response.data.error);
         } else {
-          setError(JSON.stringify(detail));
+          setError('Failed to login. Please check your credentials.');
         }
       } else {
         setError('Failed to login. Please check your credentials.');
       }
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -127,6 +139,12 @@ export default function Login() {
                 <p className="mt-2 text-sm text-slate-500">Access your dashboard, routing history, and doctor matches.</p>
               </div>
 
+              {isExpired && (
+                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+                  <span className="font-bold">Session Expired:</span> Your session has expired. Please log in again.
+                </div>
+              )}
+
               {error && (
                 <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
                   {error}
@@ -175,9 +193,17 @@ export default function Login() {
 
                 <button
                   type="submit"
-                  className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100"
+                  disabled={loading}
+                  className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-70"
                 >
-                  Sign in
+                  {loading ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Signing in...
+                    </span>
+                  ) : (
+                    'Sign in'
+                  )}
                 </button>
               </form>
 

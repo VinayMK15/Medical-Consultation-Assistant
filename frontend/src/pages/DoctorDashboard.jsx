@@ -2,6 +2,8 @@ import React, { useState, useEffect, useContext } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AuthContext } from '../context/AuthContext';
 import api from '../utils/api';
+import ScheduleManager from '../components/ScheduleManager';
+import DoctorCalendar from '../components/DoctorCalendar';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -17,13 +19,12 @@ function initials(name) {
   );
 }
 
-function formatTime(iso) {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  return d.toLocaleString('en-IN', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
+/** Format appointment_date + slot_time into a readable string. */
+function formatSlot(dateStr, slotTime) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr + 'T00:00:00');
+  const datePart = d.toLocaleDateString('en-IN', { dateStyle: 'medium' });
+  return slotTime ? `${datePart}, ${slotTime}` : datePart;
 }
 
 // ─── Sub-components ─────────────────────────────────────────────────────────
@@ -68,7 +69,7 @@ function QueueCard({ appt, isSelected, onClick }) {
             <p className={`truncate font-bold ${isCompleted ? 'text-slate-500' : 'text-slate-800'}`}>
               {appt.patient_name || 'Unknown Patient'}
             </p>
-            <p className="mt-0.5 truncate text-xs text-slate-400">{formatTime(appt.appointment_time)}</p>
+            <p className="mt-0.5 truncate text-xs text-slate-400">{formatSlot(appt.appointment_date, appt.slot_time)}</p>
           </div>
         </div>
         <StatusBadge status={appt.status} />
@@ -103,6 +104,7 @@ function WorkspaceEmpty() {
 
 function PatientDetail({ appt, prescriptionNotes, onNotesChange, onMarkComplete, completing }) {
   const isCompleted = appt.status === 'Completed';
+  const isCancelled = appt.status === 'Cancelled';
 
   return (
     <div className="flex flex-col h-full">
@@ -122,7 +124,7 @@ function PatientDetail({ appt, prescriptionNotes, onNotesChange, onMarkComplete,
           </div>
           <div className="text-right">
             <p className="text-xs font-bold uppercase tracking-wide text-slate-400">Appointment</p>
-            <p className="mt-1 text-sm font-semibold text-slate-700">{formatTime(appt.appointment_time)}</p>
+            <p className="mt-1 text-sm font-semibold text-slate-700">{formatSlot(appt.appointment_date, appt.slot_time)}</p>
             <div className="mt-2">
               <StatusBadge status={appt.status} />
             </div>
@@ -149,7 +151,11 @@ function PatientDetail({ appt, prescriptionNotes, onNotesChange, onMarkComplete,
             Prescription / Consultation Notes
           </label>
 
-          {isCompleted ? (
+          {isCancelled ? (
+            <div className="rounded-xl border border-red-200 bg-red-50/70 p-4 text-sm leading-6 text-red-700 font-medium">
+              ⚠ This appointment was cancelled by the patient and cannot be edited or completed.
+            </div>
+          ) : isCompleted ? (
             // Read-only view for completed appointments
             <div className="min-h-[120px] rounded-xl border border-slate-100 bg-slate-50 p-4 text-sm leading-7 text-slate-600 whitespace-pre-wrap">
               {appt.prescription_notes || (
@@ -172,12 +178,14 @@ function PatientDetail({ appt, prescriptionNotes, onNotesChange, onMarkComplete,
       {/* Footer Actions */}
       <div className="border-t border-slate-100 bg-slate-50 px-7 py-5 flex items-center justify-between rounded-b-2xl">
         <p className="text-xs text-slate-400">
-          {isCompleted
+          {isCancelled
+            ? 'This appointment was cancelled and cannot be edited.'
+            : isCompleted
             ? 'This appointment has been closed.'
             : 'Notes are saved when you mark as completed.'}
         </p>
         <div className="flex gap-3">
-          {!isCompleted && (
+          {!isCompleted && !isCancelled && (
             <button
               onClick={onMarkComplete}
               disabled={completing}
@@ -205,6 +213,7 @@ export default function DoctorDashboard() {
   const [apiError, setApiError] = useState('');
   const [completing, setCompleting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+  const [activeTab, setActiveTab] = useState('appointments');
 
   // Fetch appointments on mount
   useEffect(() => {
@@ -213,9 +222,10 @@ export default function DoctorDashboard() {
       setApiError('');
       try {
         const res = await api.get('/api/doctor/appointments');
-        setAppointments(res.data);
+        const apptList = res.data?.data || res.data || [];
+        setAppointments(apptList);
         // Auto-select the first pending appointment
-        const firstPending = res.data.find((a) => a.status !== 'Completed');
+        const firstPending = apptList.find((a) => a.status !== 'Completed');
         if (firstPending) setActiveAppointment(firstPending);
       } catch (err) {
         setApiError(err.response?.data?.detail || 'Failed to load appointments.');
@@ -310,6 +320,43 @@ export default function DoctorDashboard() {
             </button>
           </div>
         </div>
+
+        {/* Tab Navigation */}
+        <div className="mt-4 flex gap-1">
+          <button
+            id="tab-appointments"
+            onClick={() => setActiveTab('appointments')}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${
+              activeTab === 'appointments'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20'
+                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+            }`}
+          >
+            🩺 Appointments
+          </button>
+          <button
+            id="tab-schedule"
+            onClick={() => setActiveTab('schedule')}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${
+              activeTab === 'schedule'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20'
+                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+            }`}
+          >
+            🕐 Shift Hours
+          </button>
+          <button
+            id="tab-calendar"
+            onClick={() => setActiveTab('calendar')}
+            className={`rounded-lg px-4 py-2 text-sm font-bold transition ${
+              activeTab === 'calendar'
+                ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20'
+                : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+            }`}
+          >
+            📅 Calendar
+          </button>
+        </div>
       </header>
 
       {/* Banners */}
@@ -328,7 +375,13 @@ export default function DoctorDashboard() {
 
       {/* Main Layout */}
       <main className="mx-auto max-w-7xl px-5 py-6 lg:px-8">
-        {loading ? (
+        {activeTab === 'schedule' ? (
+          /* ── Schedule Tab ── */
+          <ScheduleManager />
+        ) : activeTab === 'calendar' ? (
+          /* ── Calendar Tab ── */
+          <DoctorCalendar />
+        ) : loading ? (
           <div className="flex h-64 items-center justify-center">
             <div className="text-center">
               <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-indigo-200 border-t-indigo-600" />

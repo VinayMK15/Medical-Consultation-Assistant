@@ -1,0 +1,280 @@
+from datetime import date as date_type
+
+from fastapi import APIRouter, HTTPException, Depends, Query, status, BackgroundTasks
+from sqlalchemy.orm import Session
+
+import schemas
+from database import get_db
+from models import User, Appointment
+from auth_utils import get_current_user
+from utils import generate_time_slots
+from services.email_service import send_booking_confirmation, send_cancellation_notice
+
+router = APIRouter(prefix="/api/appointments", tags=["Appointments"])
+
+
+@router.get("/available-slots")
+def get_available_slots(
+    doctor_id: int = Query(..., description="ID of the doctor"),
+    date: str = Query(..., description="Date in YYYY-MM-DD format"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Return all un-booked 30-minute slots for the given doctor on the given date.
+
+    Logic:
+      1. Look up the doctor's shift_start / shift_end.
+      2. Generate every possible 30-min slot in that window.
+      3. Subtract slots that are already booked on that date.
+      4. Return the remaining slots sorted chronologically.
+    """
+    # --- 1. Validate doctor ---
+    doctor = db.query(User).filter(User.id == doctor_id).first()
+    if not doctor or doctor.role != "doctor":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found.",
+        )
+
+    shift_start = doctor.shift_start or "09:00"
+    shift_end = doctor.shift_end or "17:00"
+
+    # --- 2. Parse the requested date ---
+    try:
+        requested_date = date_type.fromisoformat(date)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid date format. Use YYYY-MM-DD.",
+        )
+
+    # --- 3. Check for vacations/blocked dates ---
+    if doctor.blocked_dates and date in doctor.blocked_dates:
+        return {
+            "doctor_id": doctor_id,
+            "doctor_name": doctor.full_name,
+            "date": date,
+            "shift_start": shift_start,
+            "shift_end": shift_end,
+            "all_slots": [],
+            "available_slots": [],
+            "booked_slots_list": [],
+            "total_slots": 0,
+            "booked_slots": 0,
+            "message": f"Dr. {doctor.full_name} is on vacation on this date.",
+        }
+
+    # --- 4. Generate all possible slots ---
+    try:
+        total_slots = generate_time_slots(shift_start, shift_end)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Cannot generate slots: {exc}",
+        )
+
+    # --- 4. Query already-booked slots for this doctor + date ---
+    booked_appointments = (
+        db.query(Appointment)
+        .filter(
+            Appointment.doctor_id == doctor_id,
+            Appointment.appointment_date == requested_date,
+            Appointment.status != "Cancelled",  # ignore cancelled bookings
+        )
+        .all()
+    )
+    booked_slots = {appt.slot_time for appt in booked_appointments}
+
+    # Also subtract slots where the current patient already has an appointment
+    if current_user and current_user.role == "patient":
+        patient_appointments = (
+            db.query(Appointment)
+            .filter(
+                Appointment.patient_id == current_user.id,
+                Appointment.appointment_date == requested_date,
+                Appointment.status != "Cancelled",
+            )
+            .all()
+        )
+        booked_slots.update({appt.slot_time for appt in patient_appointments})
+
+    # --- 5. Subtract & sort ---
+    available_slots = sorted(set(total_slots) - booked_slots)
+    booked_slots_list = sorted(list(booked_slots))
+
+    return {
+        "doctor_id": doctor_id,
+        "doctor_name": doctor.full_name,
+        "date": date,
+        "shift_start": shift_start,
+        "shift_end": shift_end,
+        "all_slots": total_slots,
+        "available_slots": available_slots,
+        "booked_slots_list": booked_slots_list,
+        "total_slots": len(total_slots),
+        "booked_slots": len(booked_slots),
+    }
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_appointment(
+    appointment: schemas.AppointmentCreate,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Only patients can book appointments."
+        )
+
+    # --- Validate doctor exists, is a doctor, and is verified ---
+    doctor = db.query(User).filter(User.id == appointment.doctor_id).first()
+    if not doctor or doctor.role != "doctor":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Doctor not found.",
+        )
+    if not doctor.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This doctor is not yet verified and cannot accept appointments.",
+        )
+
+    # --- Reject past dates ---
+    if appointment.appointment_date < date_type.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot book appointments in the past.",
+        )
+
+    # --- Check if Doctor is on Vacation ---
+    if doctor.blocked_dates and appointment.appointment_date.isoformat() in doctor.blocked_dates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Dr. {doctor.full_name} is on vacation on {appointment.appointment_date} and cannot accept appointments.",
+        )
+
+    # --- Validate slot falls within doctor's shift window ---
+    shift_start = doctor.shift_start or "09:00"
+    shift_end = doctor.shift_end or "17:00"
+    if appointment.slot_time < shift_start or appointment.slot_time >= shift_end:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Slot {appointment.slot_time} is outside this doctor's "
+                f"shift hours ({shift_start}–{shift_end})."
+            ),
+        )
+
+    # --- Double-booking guard for Doctor ---
+    existing_doctor_appt = (
+        db.query(Appointment)
+        .filter(
+            Appointment.doctor_id == appointment.doctor_id,
+            Appointment.appointment_date == appointment.appointment_date,
+            Appointment.slot_time == appointment.slot_time,
+            Appointment.status != "Cancelled",
+        )
+        .first()
+    )
+    if existing_doctor_appt:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"The slot {appointment.slot_time} on "
+                f"{appointment.appointment_date} is already booked "
+                f"for this doctor."
+            ),
+        )
+
+    # --- Double-booking guard for Patient ---
+    existing_patient_appt = (
+        db.query(Appointment)
+        .filter(
+            Appointment.patient_id == current_user.id,
+            Appointment.appointment_date == appointment.appointment_date,
+            Appointment.slot_time == appointment.slot_time,
+            Appointment.status != "Cancelled",
+        )
+        .first()
+    )
+    if existing_patient_appt:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"You already have an appointment booked at "
+                f"{appointment.slot_time} on {appointment.appointment_date}."
+            ),
+        )
+
+    new_appointment = Appointment(
+        patient_id=current_user.id,
+        doctor_id=appointment.doctor_id,
+        appointment_date=appointment.appointment_date,
+        slot_time=appointment.slot_time,
+        symptoms_summary=appointment.symptoms_summary,
+        status="Pending"
+    )
+
+    db.add(new_appointment)
+    db.commit()
+    db.refresh(new_appointment)
+
+    # Fire background email task
+    background_tasks.add_task(
+        send_booking_confirmation,
+        patient_email=current_user.email,
+        doctor_email=doctor.email,
+        details={
+            "patient_name": current_user.full_name,
+            "doctor_name": doctor.full_name,
+            "specialty": doctor.specialization,
+            "date": str(appointment.appointment_date),
+            "time": appointment.slot_time,
+        }
+    )
+
+    return new_appointment
+
+
+@router.patch("/{appointment_id}/cancel")
+def cancel_appointment(
+    appointment_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Find the appointment ensuring the current user is the patient
+    appt = db.query(Appointment).filter(
+        Appointment.id == appointment_id,
+        Appointment.patient_id == current_user.id
+    ).first()
+
+    if not appt:
+        raise HTTPException(status_code=404, detail="Appointment not found.")
+
+    if appt.status.lower() != "pending":
+        raise HTTPException(status_code=400, detail="Only pending appointments can be cancelled.")
+
+    appt.status = "Cancelled"
+    db.commit()
+    
+    # Get doctor to find their email
+    doctor = db.query(User).filter(User.id == appt.doctor_id).first()
+    if doctor:
+        background_tasks.add_task(
+            send_cancellation_notice,
+            patient_email=current_user.email,
+            doctor_email=doctor.email,
+            details={
+                "patient_name": current_user.full_name,
+                "doctor_name": doctor.full_name,
+                "date": str(appt.appointment_date),
+                "time": appt.slot_time,
+            }
+        )
+
+    return {"message": "Appointment cancelled successfully."}

@@ -53,11 +53,17 @@ export default function Signup() {
       await signup({ ...signupData, role: 'patient' });
       setSubmitted(true);
     } catch (err) {
-      if (err.response && err.response.data && err.response.data.detail) {
-        const detail = err.response.data.detail;
-        setError(Array.isArray(detail) ? detail[0].msg : detail);
+      if (err.response && err.response.data) {
+        if (err.response.data.detail) {
+          const detail = err.response.data.detail;
+          setError(Array.isArray(detail) ? detail[0].msg : detail);
+        } else if (err.response.data.error) {
+          setError(err.response.data.error);
+        } else {
+          setError('Signup failed. Please try again.');
+        }
       } else {
-        setError('Signup failed. Please try again.');
+        setError('Network Error: Cannot connect to the server. Is the backend running?');
       }
     } finally {
       setLoading(false);

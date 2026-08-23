@@ -14,12 +14,13 @@ load_dotenv()
 _RAW_SECRET = os.getenv("SECRET_KEY", "")
 if not _RAW_SECRET or _RAW_SECRET.startswith("change-me"):
     import warnings
+    import secrets
     warnings.warn(
         "SECRET_KEY is not set or is still the placeholder value. "
         "Set a strong random key in backend/.env before deploying.",
         stacklevel=1,
     )
-    _RAW_SECRET = "insecure-dev-only-fallback-key"
+    _RAW_SECRET = secrets.token_hex(32)
 
 SECRET_KEY = _RAW_SECRET
 ALGORITHM = os.getenv("ALGORITHM", "HS256")

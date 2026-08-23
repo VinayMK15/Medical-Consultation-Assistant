@@ -5,15 +5,24 @@ import { AuthContext } from '../context/AuthContext';
 export default function AdminRoute({ children }) {
   const { token, user } = useContext(AuthContext);
 
-  if (!token) {
+  // Fallback to localStorage to prevent race conditions during login navigation
+  const localToken = token || localStorage.getItem('token');
+  let localUser = user;
+  if (!localUser) {
+    try {
+      const stored = localStorage.getItem('user');
+      if (stored) localUser = JSON.parse(stored);
+    } catch { /* ignore */ }
+  }
+
+  if (!localToken) {
     return <Navigate to="/admin/login" replace />;
   }
 
-  if (user?.role !== 'admin') {
-    if (user?.role === 'doctor') {
+  if (localUser?.role !== 'admin') {
+    if (localUser?.role === 'doctor') {
       return <Navigate to="/doctor/dashboard" replace />;
     }
-
     return <Navigate to="/" replace />;
   }
 

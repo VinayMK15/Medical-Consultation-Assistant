@@ -1,35 +1,162 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+"""
+main.py - MedAssist API Entrypoint
+
+Registers all routers and middleware. Business logic lives in routers/:
+  - routers/auth.py         → /api/auth/*
+  - routers/doctor.py       → /api/doctor/*
+  - routers/patient.py      → /api/patient/*
+  - routers/appointments.py → /api/appointments/*
+  - routers/admin.py        → /api/admin/*
+"""
+import os
+import math
+from datetime import date as date_type
+
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from typing import Optional
+from sqlalchemy import or_
+import random
 
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from limiter import limiter
+
+from database import engine, get_db, SessionLocal
+import models
+from models import User
+from schemas import ProcessRequest
+from auth_utils import get_current_user
 from services.translator_logic import detect_and_translate_to_english, translate_from_english
 from services.nlp_processor import extract_medical_info, normalize_city
-import models
-import schemas
-from database import engine, get_db
-from models import User
-from models import Appointment
-from auth_utils import get_password_hash, create_access_token, verify_password, get_current_user
 
+from routers import auth, doctor, patient, appointments, admin
+
+# Ensure all tables exist (Alembic manages migrations; this is a safety net)
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI()
+app = FastAPI(title="MedAssist API", version="1.0.0")
 
-# Allow React frontend to talk to FastAPI without CORS blocks
+# ---------------------------------------------------------------------------
+# Rate Limiting — shared limiter instance used by all routers
+# ---------------------------------------------------------------------------
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ---------------------------------------------------------------------------
+# CORS — restrict to known frontend origins (configurable via env var)
+# ---------------------------------------------------------------------------
+_ALLOWED_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[origin.strip() for origin in _ALLOWED_ORIGINS],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory session store: { session_id: { "symptoms": ..., "city": ..., "area": ... } }
+# ---------------------------------------------------------------------------
+# Register routers
+# ---------------------------------------------------------------------------
+app.include_router(auth.router)
+app.include_router(doctor.router)
+app.include_router(patient.router)
+app.include_router(appointments.router)
+app.include_router(admin.router)
+
+# ---------------------------------------------------------------------------
+# In-memory session store for NLP chat: { session_id: { symptoms, city, area } }
+# ---------------------------------------------------------------------------
 sessions: dict = {}
 
 # ---------------------------------------------------------------------------
-# Symptom -> Medical Specialist mapping
+# City & Area Coordinates (Latitude, Longitude)
+# ---------------------------------------------------------------------------
+CITY_AREA_COORDS = {
+    # 7 Cities
+    "Bangalore": (12.9716, 77.5946),
+    "Mumbai":    (19.0760, 72.8777),
+    "Delhi":     (28.6139, 77.2090),
+    "Chennai":   (13.0827, 80.2707),
+    "Hyderabad": (17.3850, 78.4867),
+    "Pune":      (18.5204, 73.8567),
+    "Kolkata":   (22.5726, 88.3639),
+
+    # 12 Bangalore areas
+    "Koramangala":     (12.9352, 77.6245),
+    "Indiranagar":     (12.9784, 77.6408),
+    "Jayanagar":       (12.9308, 77.5838),
+    "Whitefield":      (12.9698, 77.7500),
+    "Rajajinagar":     (12.9907, 77.5530),
+    "Banashankari":    (12.9255, 77.5468),
+    "Hebbal":          (13.0354, 77.5972),
+    "Kengeri":         (12.8996, 77.4827),
+    "Marathahalli":    (12.9591, 77.6974),
+    "BTM Layout":      (12.9166, 77.6101),
+    "HSR Layout":      (12.9116, 77.6389),
+    "Electronic City": (12.8399, 77.6770),
+
+    # 8 Mumbai areas
+    "Bandra":  (19.0596, 72.8295),
+    "Andheri": (19.1136, 72.8697),
+    "Worli":   (19.0176, 72.8172),
+    "Dadar":   (19.0178, 72.8478),
+    "Powai":   (19.1176, 72.9060),
+    "Juhu":    (19.1075, 72.8263),
+    "Malad":   (19.1874, 72.8484),
+    "Vashi":   (19.0770, 72.9986),
+}
+
+
+def haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """
+    Calculate distance in kilometers between two lat/lng points using math module.
+    Returns distance rounded to 1 decimal place.
+    """
+    R = 6371.0  # Earth radius in kilometers
+
+    dlat = math.radians(lat2 - lat1)
+    dlng = math.radians(lng2 - lng1)
+
+    a = (
+        math.sin(dlat / 2.0) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlng / 2.0) ** 2
+    )
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return round(R * c, 1)
+
+
+def get_patient_coords(city: str | None, area: str | None) -> tuple[float | None, float | None]:
+    """
+    Look up patient coordinates checking area first, falling back to city.
+    Returns (lat, lng) or (None, None) if neither found. Never raises an exception.
+    """
+    try:
+        coords_map = {k.lower(): v for k, v in CITY_AREA_COORDS.items()}
+
+        if area and isinstance(area, str):
+            area_clean = area.strip().lower()
+            if area_clean in coords_map:
+                return coords_map[area_clean]
+
+        if city and isinstance(city, str):
+            city_clean = city.strip().lower()
+            if city_clean in coords_map:
+                return coords_map[city_clean]
+
+        return (None, None)
+    except Exception:
+        return (None, None)
+
+# ---------------------------------------------------------------------------
+# Symptom → Medical Specialist mapping
 # ---------------------------------------------------------------------------
 SYMPTOM_SPECIALIST_MAP = {
     # Cardiology
@@ -72,6 +199,14 @@ SYMPTOM_SPECIALIST_MAP = {
     "joint pain":           "Orthopedist",
     "knee pain":            "Orthopedist",
     "back pain":            "Orthopedist",
+    "backache":             "Orthopedist",
+    "neck pain":            "Orthopedist",
+    "neckpain":             "Orthopedist",
+    "stiff neck":           "Orthopedist",
+    "neck stiffness":       "Orthopedist",
+    "neck ache":            "Orthopedist",
+    "shoulder pain":        "Orthopedist",
+    "shoulder ache":        "Orthopedist",
     "sprain":               "Orthopedist",
     "broken leg":           "Orthopedist",
     # Dermatology
@@ -128,167 +263,144 @@ SYMPTOM_SPECIALIST_MAP = {
     "lump":                 "Oncologist",
 }
 
-# Specialty strings we recognise (used as fallback label)
-_KNOWN_SPECIALTIES = {
-    "Cardiologist", "General Physician", "Neurologist", "Pulmonologist",
-    "Internal Medicine", "Dermatologist", "Orthopedist", "Pediatrician",
-    "Psychiatrist", "Gastroenterologist", "Endocrinologist", "Ophthalmologist",
-    "ENT Specialist", "Urologist", "Oncologist",
-}
-
 
 def get_specialist(symptoms: str) -> str:
     """Return the best-matching specialist for the given symptom string."""
     if not symptoms:
         return "General Physician"
     lower = symptoms.lower()
-    # Longest-match first so "chest pain" beats "pain"
     for keyword in sorted(SYMPTOM_SPECIALIST_MAP, key=len, reverse=True):
         if keyword in lower:
             return SYMPTOM_SPECIALIST_MAP[keyword]
     return "General Physician"
 
 
-def find_doctors(city: str | None, area: str | None, specialist: str, db: Session) -> list:
+def find_doctors(
+    city: str | None,
+    area: str | None,
+    specialist: str,
+    db: Session | None = None,
+    patient_lat: float | None = None,
+    patient_lng: float | None = None,
+) -> list:
     """
-    Query verified doctors from the SQLite database.
+    Query verified doctors from the database.
+    If patient coordinates are provided, compute distance_km, attach to each doctor dict,
+    and sort doctors list ascending by distance_km.
 
     Priority:
       1. Specialist match + city/area match
       2. General Physician fallback in the same city
       3. Any verified doctor in the city (top 3)
     """
+    # Handle parameter overload flexibility:
+    # If 4th positional arg `db` is numeric, caller passed find_doctors(city, area, specialist, patient_lat, patient_lng)
+    if isinstance(db, (float, int)):
+        patient_lng = patient_lat
+        patient_lat = db
+        db = None
+
     if not city:
         return []
 
-    # All verified doctors in the city
-    base_q = db.query(User).filter(
-        User.role == "doctor",
-        User.is_verified == True,
-    )
+    close_db_on_exit = False
+    if db is None:
+        db = SessionLocal()
+        close_db_on_exit = True
 
-    def location_filter(q):
-        """Filter doctors whose city or address matches the requested city/area."""
-        city_lower = city.lower()
-        conditions = [User.city.ilike(f"%{city_lower}%")]
-        if area:
-            area_lower = area.lower()
-            conditions.append(User.address.ilike(f"%{area_lower}%"))
-        # OR: match on city OR address containing area
-        from sqlalchemy import or_
-        return q.filter(or_(*conditions))
+    try:
+        base_q = db.query(User).filter(
+            User.role == "doctor",
+            User.is_verified == True,
+        )
 
-    def to_dict(doc: User) -> dict:
-        lat = float(doc.lat) if doc.lat else 0.0
-        lng = float(doc.lng) if doc.lng else 0.0
+        def location_filter(q):
+            city_lower = city.lower()
+            conditions = [User.city.ilike(f"%{city_lower}%")]
+            if area:
+                area_lower = area.lower()
+                conditions.append(User.address.ilike(f"%{area_lower}%"))
+            return q.filter(or_(*conditions))
 
-        if lat == 0.0 or lng == 0.0:
-            import random
+        def to_dict(doc: User) -> dict:
+            lat = float(doc.lat) if doc.lat else 0.0
+            lng = float(doc.lng) if doc.lng else 0.0
 
-            # City-level coordinates
-            city_coords = {
-                "Bangalore": [12.9716, 77.5946],
-                "Mumbai":    [19.0760, 72.8777],
-                "Delhi":     [28.6139, 77.2090],
-                "Chennai":   [13.0827, 80.2707],
-                "Kolkata":   [22.5726, 88.3639],
-                "Hyderabad": [17.3850, 78.4867],
-                "Pune":      [18.5204, 73.8567],
-                "London":    [51.5074, -0.1278],
-                "New York":  [40.7128, -74.0060],
-            }
-
-            # Bangalore area / neighbourhood coords
-            area_coords = {
-                "Whitefield":       [12.9698, 77.7500],
-                "Koramangala":      [12.9279, 77.6271],
-                "Indiranagar":      [12.9784, 77.6408],
-                "Jayanagar":        [12.9308, 77.5838],
-                "Malleswaram":      [13.0035, 77.5667],
-                "HSR Layout":       [12.9116, 77.6389],
-                "BTM Layout":       [12.9166, 77.6101],
-                "Electronic City":  [12.8399, 77.6770],
-                "Marathahalli":     [12.9591, 77.6974],
-                "Hebbal":           [13.0354, 77.5972],
-                "Yelahanka":        [13.1007, 77.5963],
-                "Banashankari":     [12.9255, 77.5468],
-                "Bellandur":        [12.9257, 77.6745],
-                "Rajajinagar":      [12.9907, 77.5530],
-                "JP Nagar":         [12.9077, 77.5856],
-            }
-
-            # 1. Try to match the doctor's address to a known Bangalore area
-            doc_address = (doc.address or "").lower()
-            matched_area = next(
-                (coords for area, coords in area_coords.items() if area.lower() in doc_address),
-                None,
-            )
-
-            if matched_area:
-                base_lat, base_lng = matched_area
-            else:
-                # 2. Fall back to city-level
-                matched_key = next(
-                    (k for k in city_coords if k.lower() == (city or "").lower()), None
+            if lat == 0.0 or lng == 0.0:
+                doc_address = (doc.address or "").lower()
+                matched_area = next(
+                    (coords for area_name, coords in CITY_AREA_COORDS.items() if area_name.lower() in doc_address),
+                    None,
                 )
-                base_lat, base_lng = city_coords[matched_key] if matched_key else (12.9716, 77.5946)
+                if matched_area:
+                    base_lat, base_lng = matched_area
+                else:
+                    matched_key = next((k for k in CITY_AREA_COORDS if k.lower() == (city or "").lower()), None)
+                    base_lat, base_lng = CITY_AREA_COORDS[matched_key] if matched_key else (12.9716, 77.5946)
 
-            lat = base_lat + random.uniform(-0.008, 0.008)
-            lng = base_lng + random.uniform(-0.008, 0.008)
+                lat = base_lat + random.uniform(-0.008, 0.008)
+                lng = base_lng + random.uniform(-0.008, 0.008)
 
-        return {
-            "id":        doc.id,
-            "name":      doc.full_name or "Unknown Doctor",
-            "specialty": doc.specialization or "General Physician",
-            "address":   doc.address or city,
-            "lat":       lat,
-            "lng":       lng,
-        }
+            return {
+                "id":        doc.id,
+                "name":      doc.full_name or "Unknown Doctor",
+                "specialty": doc.specialization or "General Physician",
+                "address":   doc.address or city,
+                "lat":       lat,
+                "lng":       lng,
+            }
 
-    city_pool_q = location_filter(base_q)
+        city_pool_q = location_filter(base_q)
 
-    # 1. Specialist + location
-    matched = city_pool_q.filter(
-        User.specialization.ilike(specialist)
-    ).all()
-    if matched:
-        return [to_dict(d) for d in matched]
+        matched = city_pool_q.filter(User.specialization.ilike(specialist)).all()
+        if matched:
+            results = [to_dict(d) for d in matched]
+        else:
+            gp = city_pool_q.filter(User.specialization.ilike("General Physician")).all()
+            if gp:
+                results = [to_dict(d) for d in gp]
+            else:
+                results = [to_dict(d) for d in city_pool_q.limit(3).all()]
 
-    # 2. General Physician fallback
-    gp = city_pool_q.filter(
-        User.specialization.ilike("General Physician")
-    ).all()
-    if gp:
-        return [to_dict(d) for d in gp]
+        if patient_lat is not None and patient_lng is not None:
+            for doc_dict in results:
+                doc_dict["distance_km"] = haversine(
+                    float(patient_lat), float(patient_lng), float(doc_dict["lat"]), float(doc_dict["lng"])
+                )
+            results.sort(key=lambda d: d["distance_km"])
 
-    # 3. Any verified doctor in the city (top 3)
-    return [to_dict(d) for d in city_pool_q.limit(3).all()]
-
-
-class UserMessage(BaseModel):
-    text: str
-    session_id: str
-
-
+        return results
+    finally:
+        if close_db_on_exit:
+            db.close()
 
 
+class UserMessage(ProcessRequest):
+    pass
 
+
+# ---------------------------------------------------------------------------
+# Root health check
+# ---------------------------------------------------------------------------
 @app.get("/")
 def read_root():
     return {"message": "Medical Consultation Assistant API is running."}
 
 
+# ---------------------------------------------------------------------------
+# NLP / AI chat endpoint
+# ---------------------------------------------------------------------------
 @app.post("/process")
-def process_message(msg: UserMessage, db: Session = Depends(get_db)):
+def process_message(
+    msg: UserMessage,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     session_id = msg.session_id
 
-    # Step 1: Detect source language + translate input to English
     english_text, user_lang = detect_and_translate_to_english(msg.text)
-
-    # Step 2: Extract medical info (symptoms, city, area)
     extracted = extract_medical_info(english_text)
 
-    # Step 3: Update session with any newly found info
     if session_id not in sessions:
         sessions[session_id] = {"symptoms": None, "city": None, "area": None}
 
@@ -300,17 +412,65 @@ def process_message(msg: UserMessage, db: Session = Depends(get_db)):
     if extracted["area"]:
         session["area"] = extracted["area"]
 
-    # Step 4: Logic gate -- determine what to reply
     symptoms = session["symptoms"]
     city     = session["city"]
     area     = session["area"]
+    extracted_city = city
+    extracted_area = area
     specialist = get_specialist(symptoms)
 
     doctors = []
-    display_location = area or city  # prefer the more specific name for the reply
+    # Location Resolution Priority Chain:
+    # Priority 1: Live GPS from frontend
+    # Priority 2: Saved home location from patient profile (coords -> city/address lookup)
+    # Priority 3: NLP extracted location from message
+    if msg.patient_lat is not None and msg.patient_lng is not None:
+        patient_lat = msg.patient_lat
+        patient_lng = msg.patient_lng
+        if not extracted_city and current_user and getattr(current_user, "city", None):
+            extracted_city = current_user.city
+            city = current_user.city
+    elif (
+        current_user
+        and getattr(current_user, "lat", None) is not None
+        and getattr(current_user, "lng", None) is not None
+        and str(current_user.lat).strip() != ""
+        and str(current_user.lng).strip() != ""
+    ):
+        try:
+            patient_lat = float(current_user.lat)
+            patient_lng = float(current_user.lng)
+        except (ValueError, TypeError):
+            patient_lat, patient_lng = get_patient_coords(extracted_city, extracted_area)
+        if not extracted_city and getattr(current_user, "city", None):
+            extracted_city = current_user.city
+            city = current_user.city
+        if not extracted_area and getattr(current_user, "address", None):
+            extracted_area = current_user.address
+            area = current_user.address
+    elif (
+        current_user
+        and getattr(current_user, "city", None) is not None
+        and str(current_user.city).strip() != ""
+    ):
+        if not extracted_city:
+            extracted_city = current_user.city
+            city = current_user.city
+        if not extracted_area and getattr(current_user, "address", None):
+            extracted_area = current_user.address
+            area = current_user.address
+        patient_lat, patient_lng = get_patient_coords(
+            current_user.city, getattr(current_user, "address", None)
+        )
+    else:
+        patient_lat, patient_lng = get_patient_coords(extracted_city, extracted_area)
 
-    if symptoms and city:
-        doctors = find_doctors(city, area, specialist, db)
+    display_location = extracted_area or extracted_city
+
+    if symptoms and extracted_city:
+        doctors = find_doctors(
+            extracted_city, extracted_area, specialist, db, patient_lat=patient_lat, patient_lng=patient_lng
+        )
         if doctors:
             reply = (
                 f"I've found {len(doctors)} {specialist}(s) in "
@@ -342,7 +502,6 @@ def process_message(msg: UserMessage, db: Session = Depends(get_db)):
         )
         consultation_status = "incomplete"
 
-    # Step 5: Translate the reply back to the user's original language
     localized_reply = translate_from_english(reply, user_lang)
 
     return {
@@ -352,288 +511,3 @@ def process_message(msg: UserMessage, db: Session = Depends(get_db)):
         "area": area,
         "doctors": doctors,
     }
-
-
-# ---------------------------------------------------------------------------
-# Auth routes
-# ---------------------------------------------------------------------------
-
-@app.post("/api/auth/signup", status_code=status.HTTP_201_CREATED)
-def signup(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # 1. Check if user already exists
-    existing = db.query(User).filter(User.email == user.email).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="An account with this email already exists.",
-        )
-
-    # 2. Hash the password
-    hashed_pw = get_password_hash(user.password)
-
-    # 3. Save to database
-    new_user = User(
-        email=user.email,
-        hashed_password=hashed_pw,
-        full_name=user.full_name,
-        age=user.age,
-        gender=user.gender,
-        role=user.role,
-        specialization=user.specialization,
-    )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-
-    # Return success message along with minimal info
-    return {
-        "message": "Account created successfully.",
-        "id": new_user.id,
-        "email": new_user.email
-    }
-
-
-@app.post("/api/auth/login")
-def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
-    # 1. Check user exists
-    user = db.query(User).filter(User.email == user_credentials.email).first()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid Credentials",
-        )
-
-    # 2. Verify password
-    if not verify_password(user_credentials.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid Credentials",
-        )
-
-    # 3. Check verification status for doctors
-    if user.role == "doctor" and not user.is_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account is pending admin verification.",
-        )
-
-    # 4. Create access token
-    token = create_access_token(data={"sub": user.email})
-
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "name": user.full_name,
-            "email": user.email,
-            "role": user.role,
-            "is_verified": user.is_verified,
-        }
-    }
-
-
-# ---------------------------------------------------------------------------
-# Doctor routes
-# ---------------------------------------------------------------------------
-
-@app.get("/api/doctor/appointments")
-def get_doctor_appointments(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only."
-        )
-
-    # Join with User table to get patient name + email
-    appointments = db.query(Appointment).filter(
-        Appointment.doctor_id == current_user.id
-    ).all()
-
-    result = []
-    for appt in appointments:
-        patient = db.query(User).filter(User.id == appt.patient_id).first()
-        result.append({
-            "id": appt.id,
-            "patient_id": appt.patient_id,
-            "doctor_id": appt.doctor_id,
-            "appointment_time": appt.appointment_time,
-            "symptoms_summary": appt.symptoms_summary,
-            "status": appt.status,
-            "patient_name": patient.full_name if patient else "Unknown Patient",
-            "patient_email": patient.email if patient else None,
-        })
-
-    return result
-
-
-@app.patch("/api/doctor/appointments/{appointment_id}/complete")
-def complete_appointment(
-    appointment_id: int,
-    payload: schemas.AppointmentComplete,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only."
-        )
-
-    appt = db.query(Appointment).filter(
-        Appointment.id == appointment_id,
-        Appointment.doctor_id == current_user.id
-    ).first()
-
-    if not appt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Appointment not found."
-        )
-
-    appt.status = "Completed"
-    appt.prescription_notes = payload.prescription_notes
-    db.commit()
-    db.refresh(appt)
-    return {"message": "Appointment marked as completed.", "appointment_id": appt.id}
-
-
-# ---------------------------------------------------------------------------
-# Patient routes
-# ---------------------------------------------------------------------------
-
-@app.get("/api/patient/appointments")
-def get_patient_appointments(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Return all appointments for the authenticated patient, enriched with doctor details."""
-    if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Patient portal only."
-        )
-
-    # Alias the User table so we can join it as the "doctor" side
-    DoctorUser = models.User
-
-    rows = (
-        db.query(Appointment, DoctorUser)
-        .join(DoctorUser, Appointment.doctor_id == DoctorUser.id)
-        .filter(Appointment.patient_id == current_user.id)
-        .all()
-    )
-
-    result = []
-    for appt, doctor in rows:
-        result.append({
-            "id":             appt.id,
-            "doctor_name":    doctor.full_name or "Unknown Doctor",
-            "specialty":      doctor.specialization or "General",
-            "date":           appt.appointment_time.isoformat() if appt.appointment_time else None,
-            "symptoms":       appt.symptoms_summary,
-            "status":         appt.status,
-        })
-
-    return result
-
-
-@app.post("/api/appointments", status_code=status.HTTP_201_CREATED)
-def create_appointment(
-    appointment: schemas.AppointmentCreate,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Only patients can book appointments."
-        )
-
-    new_appointment = Appointment(
-        patient_id=current_user.id,
-        doctor_id=appointment.doctor_id,
-        appointment_time=appointment.appointment_time,
-        symptoms_summary=appointment.symptoms_summary,
-        status="Pending"
-    )
-    
-    db.add(new_appointment)
-    db.commit()
-    db.refresh(new_appointment)
-    
-    return new_appointment
-
-
-# ---------------------------------------------------------------------------
-# Admin routes
-# ---------------------------------------------------------------------------
-
-@app.get("/api/admin/pending-doctors", response_model=list[schemas.UserResponse])
-def get_pending_doctors(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Admin portal only."
-        )
-
-    return db.query(User).filter(
-        User.role == "doctor",
-        User.is_verified == False
-    ).all()
-
-
-@app.post("/api/admin/verify-doctor/{doctor_id}")
-def verify_doctor(
-    doctor_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Admin portal only."
-        )
-
-    doctor = db.query(User).filter(User.id == doctor_id, User.role == "doctor").first()
-    if not doctor:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Doctor not found."
-        )
-
-    doctor.is_verified = True
-    db.commit()
-    db.refresh(doctor)
-
-    return {"message": f"Doctor '{doctor.full_name}' has been verified successfully.", "doctor_id": doctor.id}
-
-
-@app.delete("/api/admin/reject-doctor/{doctor_id}")
-def reject_doctor(
-    doctor_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Admin portal only."
-        )
-
-    doctor = db.query(User).filter(User.id == doctor_id, User.role == "doctor").first()
-    if not doctor:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Doctor not found."
-        )
-
-    db.delete(doctor)
-    db.commit()
-
-    return {"message": f"Doctor '{doctor.full_name}' has been rejected and removed.", "doctor_id": doctor_id}

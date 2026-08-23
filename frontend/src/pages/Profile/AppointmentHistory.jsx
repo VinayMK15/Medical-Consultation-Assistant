@@ -3,15 +3,15 @@ import api from '../../utils/api';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatDate(dateStr) {
+function formatDate(dateStr, slotTime) {
   if (!dateStr) return 'N/A';
-  return new Date(dateStr).toLocaleDateString('en-US', {
+  const d = new Date(dateStr + 'T00:00:00');
+  const datePart = d.toLocaleDateString('en-US', {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
   });
+  return slotTime ? `${datePart}, ${slotTime}` : datePart;
 }
 
 const STATUS_STYLES = {
@@ -33,7 +33,9 @@ function StatusBadge({ status = 'pending' }) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function AppointmentCard({ appt }) {
+function AppointmentCard({ appt, onCancel }) {
+  const [cancelling, setCancelling] = useState(false);
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:shadow-md">
       <div className="flex items-start justify-between gap-3">
@@ -59,7 +61,7 @@ function AppointmentCard({ appt }) {
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Date & Time</p>
-          <p className="mt-0.5 text-sm font-semibold text-slate-700">{formatDate(appt.date)}</p>
+          <p className="mt-0.5 text-sm font-semibold text-slate-700">{formatDate(appt.appointment_date, appt.slot_time)}</p>
         </div>
         <div>
           <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Symptoms</p>
@@ -68,6 +70,33 @@ function AppointmentCard({ appt }) {
           </p>
         </div>
       </div>
+
+      {/* Prescription / Notes (Only show if completed and exists) */}
+      {appt.status?.toLowerCase() === 'completed' && appt.prescription_notes && (
+        <div className="mt-4 rounded-xl border border-indigo-100 bg-indigo-50 p-4">
+          <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-400">Prescription & Doctor Notes</p>
+          <p className="mt-1 text-sm text-indigo-900 whitespace-pre-wrap leading-relaxed">
+            {appt.prescription_notes}
+          </p>
+        </div>
+      )}
+
+      {/* Cancel Action (Only if pending) */}
+      {appt.status?.toLowerCase() === 'pending' && onCancel && (
+        <div className="mt-4 flex justify-end border-t border-slate-100 pt-3">
+          <button
+            onClick={async () => {
+              setCancelling(true);
+              await onCancel(appt.id);
+              setCancelling(false);
+            }}
+            disabled={cancelling}
+            className="rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-bold text-red-600 transition hover:bg-red-100 disabled:opacity-50"
+          >
+            {cancelling ? 'Cancelling...' : 'Cancel Appointment'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -119,7 +148,7 @@ export default function AppointmentHistory() {
       setError(null);
       try {
         const res = await api.get('/api/patient/appointments');
-        if (!cancelled) setAppointments(res.data || []);
+        if (!cancelled) setAppointments(res.data?.data || res.data || []);
       } catch (err) {
         if (!cancelled) {
           const msg =
@@ -136,6 +165,18 @@ export default function AppointmentHistory() {
     fetchAppointments();
     return () => { cancelled = true; };
   }, []);
+
+  const handleCancel = async (id) => {
+    try {
+      await api.patch(`/api/appointments/${id}/cancel`);
+      setAppointments((prev) => 
+        prev.map(a => a.id === id ? { ...a, status: 'Cancelled' } : a)
+      );
+    } catch (err) {
+      console.error("Failed to cancel appointment:", err);
+      alert(err.response?.data?.detail || "Failed to cancel appointment.");
+    }
+  };
 
   const upcoming  = appointments.filter((a) => ['pending', 'confirmed'].includes(a.status?.toLowerCase()));
   const past      = appointments.filter((a) => ['completed', 'cancelled'].includes(a.status?.toLowerCase()));
@@ -170,7 +211,7 @@ export default function AppointmentHistory() {
                 </h3>
                 <div className="space-y-3">
                   {upcoming.map((appt) => (
-                    <AppointmentCard key={appt.id} appt={appt} />
+                    <AppointmentCard key={appt.id} appt={appt} onCancel={handleCancel} />
                   ))}
                 </div>
               </section>
