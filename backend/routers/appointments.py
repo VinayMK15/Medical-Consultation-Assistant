@@ -2,6 +2,7 @@ from datetime import date as date_type
 
 from fastapi import APIRouter, HTTPException, Depends, Query, status, BackgroundTasks
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 import schemas
 from database import get_db
@@ -219,9 +220,20 @@ def create_appointment(
         status="Pending"
     )
 
-    db.add(new_appointment)
-    db.commit()
-    db.refresh(new_appointment)
+    try:
+        db.add(new_appointment)
+        db.commit()
+        db.refresh(new_appointment)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"The slot {appointment.slot_time} on "
+                f"{appointment.appointment_date} was just booked "
+                f"by another request. Please select a different slot."
+            ),
+        )
 
     # Fire background email task
     background_tasks.add_task(

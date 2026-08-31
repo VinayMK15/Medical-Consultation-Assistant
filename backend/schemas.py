@@ -31,6 +31,8 @@ class UserResponse(BaseModel):
     specialization: Optional[str] = None
     city: Optional[str] = None
     address: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
     # --- NEW: Doctor shift window ---
     shift_start: str = "09:00"
     shift_end: str = "17:00"

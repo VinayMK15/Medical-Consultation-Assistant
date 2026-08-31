@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Date, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey, Date, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
@@ -19,8 +19,8 @@ class User(Base):
     # Location fields (relevant for doctors)
     city = Column(String, nullable=True)
     address = Column(String, nullable=True)
-    lat = Column(String, nullable=True)   # stored as string for flexibility
-    lng = Column(String, nullable=True)
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
 
     # --- NEW: Doctor shift/availability window (stored as "HH:MM" strings) ---
     shift_start = Column(String, default="09:00")  # e.g. "09:00"
@@ -44,6 +44,14 @@ class User(Base):
 
 class Appointment(Base):
     __tablename__ = "appointments"
+    __table_args__ = (
+        UniqueConstraint(
+            "doctor_id",
+            "appointment_date",
+            "slot_time",
+            name="uq_doctor_date_slot"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     patient_id = Column(Integer, ForeignKey("users.id"))

@@ -10,6 +10,33 @@ from auth_utils import get_current_user
 router = APIRouter(prefix="/api/patient", tags=["Patient"])
 
 
+@router.get("/profile")
+def get_patient_profile(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Return the authenticated patient's profile (including home location)."""
+    if current_user.role != "patient":
+        raise HTTPException(status_code=403, detail="Patient portal only.")
+    return {
+        "id": current_user.id,
+        "name": current_user.full_name,
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "role": current_user.role,
+        "is_verified": current_user.is_verified,
+        "age": current_user.age,
+        "gender": current_user.gender,
+        "city": current_user.city,
+        "address": current_user.address,
+        "lat": current_user.lat,
+        "lng": current_user.lng,
+        "specialization": current_user.specialization,
+        "shift_start": current_user.shift_start,
+        "shift_end": current_user.shift_end,
+    }
+
+
 @router.put("/profile")
 def update_patient_profile(
     payload: schemas.PatientProfileUpdate,
@@ -24,12 +51,28 @@ def update_patient_profile(
     if payload.gender is not None: current_user.gender = payload.gender
     if payload.city is not None: current_user.city = payload.city
     if payload.address is not None: current_user.address = payload.address
-    if payload.lat is not None: current_user.lat = str(payload.lat) if payload.lat is not None else None
-    if payload.lng is not None: current_user.lng = str(payload.lng) if payload.lng is not None else None
+    if payload.lat is not None: current_user.lat = payload.lat
+    if payload.lng is not None: current_user.lng = payload.lng
 
     db.commit()
     db.refresh(current_user)
-    return current_user
+    return {
+        "id": current_user.id,
+        "name": current_user.full_name,
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "role": current_user.role,
+        "is_verified": current_user.is_verified,
+        "age": current_user.age,
+        "gender": current_user.gender,
+        "city": current_user.city,
+        "address": current_user.address,
+        "lat": current_user.lat,
+        "lng": current_user.lng,
+        "specialization": current_user.specialization,
+        "shift_start": current_user.shift_start,
+        "shift_end": current_user.shift_end,
+    }
 
 
 @router.get("/appointments")

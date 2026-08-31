@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 import random
+from cachetools import TTLCache
 
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -33,10 +34,48 @@ from services.nlp_processor import extract_medical_info, normalize_city
 
 from routers import auth, doctor, patient, appointments, admin
 
-# Ensure all tables exist (Alembic manages migrations; this is a safety net)
-models.Base.metadata.create_all(bind=engine)
+import logging
+from contextlib import asynccontextmanager
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
 
-app = FastAPI(title="MedAssist API", version="1.0.0")
+logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Startup: validate that Alembic migrations are up to date.
+    Never create tables directly — Alembic owns schema management.
+    """
+    try:
+        alembic_cfg = Config("alembic.ini")
+        script = ScriptDirectory.from_config(alembic_cfg)
+        head_revision = script.get_current_head()
+
+        with engine.connect() as conn:
+            context = MigrationContext.configure(conn)
+            current_revision = context.get_current_revision()
+
+        if current_revision != head_revision:
+            logger.warning(
+                "Database migrations are not up to date. "
+                "Current: %s | Head: %s | "
+                "Run: alembic upgrade head",
+                current_revision,
+                head_revision,
+            )
+        else:
+            logger.info(
+                "Database schema is up to date at revision: %s",
+                current_revision,
+            )
+    except Exception as e:
+        logger.warning("Could not validate Alembic migration state: %s", e)
+
+    yield  # Application runs here
+
+app = FastAPI(title="MedAssist API", version="1.0.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Rate Limiting — shared limiter instance used by all routers
@@ -70,9 +109,11 @@ app.include_router(appointments.router)
 app.include_router(admin.router)
 
 # ---------------------------------------------------------------------------
-# In-memory session store for NLP chat: { session_id: { symptoms, city, area } }
+# TTL session store for NLP chat: max 1000 sessions, each expires after 30 min
 # ---------------------------------------------------------------------------
-sessions: dict = {}
+SESSION_TTL_SECONDS = 60 * 30   # 30 minutes
+SESSION_MAX_SIZE    = 1000
+sessions: TTLCache  = TTLCache(maxsize=SESSION_MAX_SIZE, ttl=SESSION_TTL_SECONDS)
 
 # ---------------------------------------------------------------------------
 # City & Area Coordinates (Latitude, Longitude)
@@ -100,6 +141,10 @@ CITY_AREA_COORDS = {
     "BTM Layout":      (12.9166, 77.6101),
     "HSR Layout":      (12.9116, 77.6389),
     "Electronic City": (12.8399, 77.6770),
+    "Malleswaram":     (12.9997, 77.5713),
+    "Bellandur":       (12.9263, 77.6756),
+    "JP Nagar":        (12.9082, 77.5858),
+    "Yelahanka":       (13.1007, 77.5963),
 
     # 8 Mumbai areas
     "Bandra":  (19.0596, 72.8295),
@@ -191,24 +236,24 @@ SYMPTOM_SPECIALIST_MAP = {
     "fatigue":              "General Physician",
     "weakness":             "General Physician",
     # Orthopedics
-    "broken arm":           "Orthopedist",
-    "broke my arm":         "Orthopedist",
-    "fracture":             "Orthopedist",
-    "broken bone":          "Orthopedist",
-    "bone pain":            "Orthopedist",
-    "joint pain":           "Orthopedist",
-    "knee pain":            "Orthopedist",
-    "back pain":            "Orthopedist",
-    "backache":             "Orthopedist",
-    "neck pain":            "Orthopedist",
-    "neckpain":             "Orthopedist",
-    "stiff neck":           "Orthopedist",
-    "neck stiffness":       "Orthopedist",
-    "neck ache":            "Orthopedist",
-    "shoulder pain":        "Orthopedist",
-    "shoulder ache":        "Orthopedist",
-    "sprain":               "Orthopedist",
-    "broken leg":           "Orthopedist",
+    "broken arm":           "Orthopedic Surgeon",
+    "broke my arm":         "Orthopedic Surgeon",
+    "fracture":             "Orthopedic Surgeon",
+    "broken bone":          "Orthopedic Surgeon",
+    "bone pain":            "Orthopedic Surgeon",
+    "joint pain":           "Orthopedic Surgeon",
+    "knee pain":            "Orthopedic Surgeon",
+    "back pain":            "Orthopedic Surgeon",
+    "backache":             "Orthopedic Surgeon",
+    "neck pain":            "Orthopedic Surgeon",
+    "neckpain":             "Orthopedic Surgeon",
+    "stiff neck":           "Orthopedic Surgeon",
+    "neck stiffness":       "Orthopedic Surgeon",
+    "neck ache":            "Orthopedic Surgeon",
+    "shoulder pain":        "Orthopedic Surgeon",
+    "shoulder ache":        "Orthopedic Surgeon",
+    "sprain":               "Orthopedic Surgeon",
+    "broken leg":           "Orthopedic Surgeon",
     # Dermatology
     "rash":                 "Dermatologist",
     "skin rash":            "Dermatologist",
@@ -323,8 +368,8 @@ def find_doctors(
             return q.filter(or_(*conditions))
 
         def to_dict(doc: User) -> dict:
-            lat = float(doc.lat) if doc.lat else 0.0
-            lng = float(doc.lng) if doc.lng else 0.0
+            lat = doc.lat or 0.0
+            lng = doc.lng or 0.0
 
             if lat == 0.0 or lng == 0.0:
                 doc_address = (doc.address or "").lower()
@@ -434,14 +479,9 @@ def process_message(
         current_user
         and getattr(current_user, "lat", None) is not None
         and getattr(current_user, "lng", None) is not None
-        and str(current_user.lat).strip() != ""
-        and str(current_user.lng).strip() != ""
     ):
-        try:
-            patient_lat = float(current_user.lat)
-            patient_lng = float(current_user.lng)
-        except (ValueError, TypeError):
-            patient_lat, patient_lng = get_patient_coords(extracted_city, extracted_area)
+        patient_lat = current_user.lat
+        patient_lng = current_user.lng
         if not extracted_city and getattr(current_user, "city", None):
             extracted_city = current_user.city
             city = current_user.city

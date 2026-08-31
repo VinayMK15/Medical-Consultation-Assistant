@@ -84,10 +84,21 @@ def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db
         "access_token": token,
         "token_type": "bearer",
         "user": {
+            "id": user.id,
             "name": user.full_name,
+            "full_name": user.full_name,
             "email": user.email,
             "role": user.role,
             "is_verified": user.is_verified,
+            "age": user.age,
+            "gender": user.gender,
+            "city": user.city,
+            "address": user.address,
+            "lat": user.lat,
+            "lng": user.lng,
+            "specialization": user.specialization,
+            "shift_start": user.shift_start,
+            "shift_end": user.shift_end,
         }
     }
 
