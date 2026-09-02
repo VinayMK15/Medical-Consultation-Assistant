@@ -62,8 +62,67 @@ This will create the following sample accounts:
 
 ---
 
-## 🛠️ Key Features Built
-- **Multi-language Support:** Automatically detects the user's language (Hindi, Tamil, French, etc.), translates to English for NLP processing, and translates the reply back to the native language.
-- **Robust NLP:** Uses a local Llama3 model to extract symptoms and city/area. Includes a regex/dictionary fallback mechanism for when the AI is offline.
-- **Modular Dashboard:** Interactive map, clean chat UI with independent scrolling, and a dedicated user profile section.
-- **Role-Based Access Control:** Strict separation of Patient, Doctor, and Admin portals using JWT authentication.
+## Key Features
+
+### 🤖 AI-Powered Symptom Analysis
+- 3-tier NLP pipeline: Ollama (LLaMA3) → Google Gemini → Regex fallback
+- Extracts symptoms, city and area from natural language input
+- Auto-learns new symptoms and persists them across sessions
+- Multilingual input with automatic language detection and translation
+
+### 🗺️ Smart Doctor Discovery
+- Symptom-to-specialization routing across 16 medical domains
+- Haversine-based proximity sorting — nearest doctor always appears first
+- Interactive Leaflet map with matched doctors highlighted as blue pins
+- All available doctors shown as background grey pins on page load
+- Three location modes — Live GPS, Saved Home Address, Typed in Chat
+
+### 👥 Role-Based Access Control
+- Three fully isolated portals — Patient, Doctor, Admin
+- JWT authentication with protected routes on frontend and backend
+- Session timeout management and rate limiting on all API endpoints
+- Password reset via email with secure token validation
+
+### 👨‍⚕️ Doctor Verification Workflow
+- Doctors self-register and remain inactive until Admin approves
+- Admin can approve or reject pending doctor registrations
+- Only verified doctors are discoverable by patients
+- Admin can create, update and delete any user account
+
+### 📅 Appointment & Scheduling System
+- Slot-based booking with 30-minute appointment windows
+- Real-time available slot generation based on doctor shift hours
+- Double-booking protection at both application and database level
+- Appointment cancellation with email notification to both parties
+- Doctor vacation and blockout date management
+- Patient appointment history with status tracking
+
+### 🏥 Doctor Dashboard
+- Incoming appointment queue with patient symptom summaries
+- Shift schedule management (start and end time configuration)
+- Calendar view of upcoming bookings
+- Vacation mode with date range blockouts
+- Prescription notes on completed appointments
+
+### ⚙️ Admin Control Panel
+- Platform-wide stats — pending doctors, active doctors, total patients
+- Approve or reject pending doctor registrations
+- Full user management — create, edit and delete any account
+- Filter users by role and verification status
+
+### 🛡️ Security & Reliability
+- Bcrypt password hashing
+- JWT token-based authentication on every protected route
+- Rate limiting via SlowAPI to prevent abuse
+- Database-level unique constraint preventing race condition double bookings
+- TTL-based session store with automatic expiry after 30 minutes
+- Alembic database migrations for safe schema versioning
+- Background email tasks for booking and cancellation notifications
+
+### 🧱 Architecture
+- React + Vite frontend with Tailwind CSS
+- FastAPI Python backend with modular router structure
+- SQLite database managed via SQLAlchemy ORM
+- Alembic for database migrations
+- Three-tier NLP: Ollama → Gemini → Regex
+- Leaflet.js interactive maps with OpenStreetMap tiles
