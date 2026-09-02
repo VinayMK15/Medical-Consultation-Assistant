@@ -1,6 +1,6 @@
 # Medical Consultation Assistant (MedAssist)
 
-MedAssist is an AI-powered medical routing platform. It uses natural language processing to understand a patient's symptoms and location (in multiple languages), and matches them with verified doctors nearby.
+MedAssist is a web-based medical consultation platform that simplifies the process of finding the right doctor by automating symptom analysis and specialist routing. Patients describe their symptoms in natural language through a conversational chat interface, which is processed by a three-tier AI pipeline using Ollama, Google Gemini and a regex fallback to extract medical intent. The system maps symptoms across sixteen specializations and recommends verified, proximity-ranked doctors on an interactive Leaflet map. Built on React, FastAPI and SQLite, the platform supports three isolated role-based portals for Patients, Doctors and Administrators, secured with JWT authentication. Doctors undergo admin verification before being listed, ensuring platform trust. Additional features include slot-based appointment booking, shift scheduling, vacation management and multilingual input support.
 
 ## 🚀 Getting Started
 
