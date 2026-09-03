@@ -1,6 +1,6 @@
-import React, { useContext, useState } from 'react';
-import { AuthContext } from '../../context/AuthContext';
-import api from '../../utils/api';
+import React, { useContext, useState, useEffect } from 'react';
+import { AuthContext } from '../../../shared/context/AuthContext';
+import api from '../../../shared/utils/api';
 
 function InfoField({ label, value }) {
   return (
@@ -18,18 +18,32 @@ export default function PersonalInfo() {
   const [saveSuccess, setSaveSuccess] = useState(false);
   
   const [formData, setFormData] = useState({
-    full_name: '',
-    age: '',
-    gender: ''
+    full_name: user?.full_name || user?.name || '',
+    age: user?.age || '',
+    gender: user?.gender || ''
   });
   const [city, setCity]       = useState(user?.city    || '');
   const [address, setAddress] = useState(user?.address || '');
 
+  useEffect(() => {
+    api.get('/api/patient/profile').then((res) => {
+      if (res.data) {
+        setCity(res.data.city || '');
+        setAddress(res.data.address || '');
+        setFormData({
+          full_name: res.data.full_name || '',
+          age: res.data.age || '',
+          gender: res.data.gender || ''
+        });
+      }
+    }).catch(() => {});
+  }, []);
+
   const handleEditClick = () => {
     setFormData({
-      full_name: user.full_name || user.name || '',
-      age: user.age || '',
-      gender: user.gender || ''
+      full_name: user?.full_name || user?.name || '',
+      age: user?.age || '',
+      gender: user?.gender || ''
     });
     setCity(user?.city || '');
     setAddress(user?.address || '');

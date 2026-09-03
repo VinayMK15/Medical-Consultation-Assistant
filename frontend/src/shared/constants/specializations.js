@@ -1,0 +1,18 @@
+export const SPECIALIZATIONS = [
+  'Cardiologist',
+  'General Physician',
+  'Neurologist',
+  'Pulmonologist',
+  'Internal Medicine',
+  'Dermatologist',
+  'Pediatrician',
+  'Gynecologist',
+  'Orthopedic Surgeon',
+  'Psychiatrist',
+  'Ophthalmologist',
+  'ENT Specialist',
+  'Endocrinologist',
+  'Urologist',
+  'Gastroenterologist',
+  'Oncologist',
+];

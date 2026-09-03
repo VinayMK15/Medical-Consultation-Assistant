@@ -57,6 +57,21 @@ class PatientProfileUpdate(BaseModel):
     lng: Optional[float] = None
 
 
+class PatientProfileResponse(BaseModel):
+    id: int
+    full_name: Optional[str] = None
+    email: EmailStr
+    age: Optional[int] = None
+    gender: Optional[str] = None
+    city: Optional[str] = None
+    address: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
 
@@ -201,7 +216,8 @@ class AppointmentResponse(BaseModel):
 
 class ProcessRequest(BaseModel):
     """Schema for POST /process request body with optional GPS coordinates."""
-    text: str
+    text: Optional[str] = None
+    message: Optional[str] = None
     session_id: str
     patient_lat: Optional[float] = None
     patient_lng: Optional[float] = None

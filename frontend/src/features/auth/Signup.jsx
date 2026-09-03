@@ -1,6 +1,6 @@
 import React, { useState, useContext } from 'react';
 import { Link } from 'react-router-dom';
-import { AuthContext } from '../context/AuthContext';
+import { AuthContext } from '../../shared/context/AuthContext';
 
 const routingBenefits = [
   'Symptom-based doctor routing',

@@ -1,6 +1,6 @@
 import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { AuthContext } from '../context/AuthContext';
-import api from '../utils/api';
+import { AuthContext } from '../../shared/context/AuthContext';
+import api from '../../shared/utils/api';
 
 // ─── Shared UI primitives ──────────────────────────────────────────────────────
 const statusStyles = {

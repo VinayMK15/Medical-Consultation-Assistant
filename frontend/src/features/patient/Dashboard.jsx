@@ -1,12 +1,20 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { AuthContext } from '../context/AuthContext';
+import { AuthContext } from '../../shared/context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import api from '../utils/api';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import api from '../../shared/utils/api';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import {
+  INDIA_CENTER,
+  INDIA_BOUNDS,
+  INDIA_MIN_ZOOM,
+  INDIA_MAX_ZOOM,
+  CITY_AREA_COORDS,
+  CITY_COORDS,
+} from '../../shared/constants/cities';
 
-// --- Leaflet icon fix (missing marker icons in Vite/Webpack builds) ---
+// Smoothly re-centers the map when coords change
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
@@ -14,29 +22,130 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 });
 
-// City -> coordinates lookup
-const CITY_COORDS = {
-  Bangalore: [12.9716, 77.5946],
-  Mumbai: [19.0760, 72.8777],
-  Delhi: [28.6139, 77.2090],
-  Chennai: [13.0827, 80.2707],
-  Kolkata: [22.5726, 88.3639],
-  Hyderabad: [17.3850, 78.4867],
-  Pune: [18.5204, 73.8567],
-  London: [51.5074, -0.1278],
-  'New York': [40.7128, -74.0060],
-};
+// Custom red pin for patient's location
+const patientIcon = L.divIcon({
+  className: 'custom-patient-marker',
+  html: `
+    <div style="display: flex; align-items: center; justify-content: center; width: 30px; height: 30px;">
+      <div style="
+        background-color: #DC2626;
+        width: 24px;
+        height: 24px;
+        border-radius: 50% 50% 50% 0;
+        transform: rotate(-45deg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 3px 6px rgba(0,0,0,0.35);
+        border: 2px solid #FFFFFF;
+      ">
+        <div style="
+          width: 8px;
+          height: 8px;
+          background: white;
+          border-radius: 50%;
+          transform: rotate(45deg);
+        "></div>
+      </div>
+    </div>
+  `,
+  iconSize: [30, 30],
+  iconAnchor: [15, 30],
+  popupAnchor: [0, -28],
+});
 
-// Smoothly re-centers the map when coords change
+// Resolves coordinates from address or city with area substring matching
+function resolveCoordinates(address, city) {
+  if (address) {
+    if (CITY_AREA_COORDS[address]) {
+      return CITY_AREA_COORDS[address];
+    }
+    const cleanAddr = address.toLowerCase();
+    for (const [area, coords] of Object.entries(CITY_AREA_COORDS)) {
+      if (cleanAddr.includes(area.toLowerCase())) {
+        return coords;
+      }
+    }
+  }
+  if (city) {
+    if (CITY_AREA_COORDS[city]) {
+      return CITY_AREA_COORDS[city];
+    }
+    if (CITY_COORDS[city]) {
+      return CITY_COORDS[city];
+    }
+  }
+  return null;
+}
+
+// Haversine straight-line distance helper in km
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 function RecenterMap({ coords }) {
   const map = useMap();
   useEffect(() => {
-    map.setView(coords, 13, { animate: true });
+    if (coords) {
+      map.setView(coords, 12, { animate: true });
+    }
   }, [coords, map]);
   return null;
 }
 
-function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDoctor, bookedDoctorId }) {
+// Renders the OSRM route as a glowing dual-layer Leaflet Polyline
+// OSRM returns [lng, lat] pairs — Leaflet needs [lat, lng]
+function RouteLayer({ geometry }) {
+  if (!geometry || !geometry.coordinates) return null;
+  const positions = geometry.coordinates.map(([lng, lat]) => [lat, lng]);
+  return (
+    <>
+      {/* Outer contrast halo */}
+      <Polyline
+        positions={positions}
+        pathOptions={{
+          color: '#065F46',
+          weight: 7,
+          opacity: 0.9,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }}
+      />
+      {/* Inner bright highlight */}
+      <Polyline
+        positions={positions}
+        pathOptions={{
+          color: '#10B981',
+          weight: 4,
+          opacity: 1,
+          lineCap: 'round',
+          lineJoin: 'round',
+        }}
+      />
+    </>
+  );
+}
+
+function MatchedDoctorsPanel({
+  doctors,
+  city,
+  isCollapsed,
+  onToggle,
+  onBookDoctor,
+  bookedDoctorId,
+  selectedDoctorId,
+  onSelectDoctor,
+}) {
   const title = doctors.length > 0 ? `${doctors.length} doctors near ${city}` : 'No matches yet';
 
   if (isCollapsed) {
@@ -90,11 +199,22 @@ function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDocto
             {doctors.map((doc, index) => {
               const isThisDoctorBooked = bookedDoctorId === doc.id;
               const isSearchLocked = bookedDoctorId !== null;
+              const isSelected = selectedDoctorId === doc.id;
 
               return (
-                <div key={doc.id} className="flex items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 p-4">
+                <div
+                  key={doc.id}
+                  onClick={() => onSelectDoctor && onSelectDoctor(doc)}
+                  className={`flex items-center justify-between gap-3 rounded-xl border p-4 transition cursor-pointer ${
+                    isSelected
+                      ? 'border-emerald-500 bg-emerald-50/60 ring-2 ring-emerald-400'
+                      : 'border-slate-100 bg-slate-50 hover:bg-slate-100/80'
+                  }`}
+                >
                   <div className="flex items-start gap-3 min-w-0">
-                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+                    <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                      isSelected ? 'bg-emerald-600 text-white' : 'bg-blue-600 text-white'
+                    }`}>
                       {index + 1}
                     </span>
                     <div className="min-w-0">
@@ -116,27 +236,49 @@ function MatchedDoctorsPanel({ doctors, city, isCollapsed, onToggle, onBookDocto
                       )}
                     </div>
                   </div>
-                  {isThisDoctorBooked ? (
-                    <span className="shrink-0 rounded-lg border border-green-200 bg-green-100 px-3 py-1.5 text-xs font-bold text-green-700 shadow-sm flex items-center gap-1">
-                      ✓ Booked
-                    </span>
-                  ) : isSearchLocked ? (
+
+                  <div className="flex items-center gap-2 shrink-0">
                     <button
-                      disabled
                       type="button"
-                      title="You have already booked a doctor for this search entry."
-                      className="shrink-0 rounded-lg border border-slate-200 bg-slate-200/80 px-3 py-1.5 text-xs font-semibold text-slate-400 cursor-not-allowed opacity-80"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectDoctor && onSelectDoctor(doc);
+                      }}
+                      className={`rounded-lg px-2.5 py-1.5 text-xs font-bold transition shadow-sm ${
+                        isSelected
+                          ? 'bg-teal-600 text-white shadow-teal-500/20'
+                          : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                      }`}
                     >
-                      1 Booked Max
+                      {isSelected ? '🗺️ Active' : '🗺️ Route'}
                     </button>
-                  ) : (
-                    <button
-                      onClick={() => onBookDoctor(doc)}
-                      className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
-                    >
-                      Book Now
-                    </button>
-                  )}
+
+                    {isThisDoctorBooked ? (
+                      <span className="rounded-lg border border-green-200 bg-green-100 px-3 py-1.5 text-xs font-bold text-green-700 shadow-sm flex items-center gap-1">
+                        ✓ Booked
+                      </span>
+                    ) : isSearchLocked ? (
+                      <button
+                        disabled
+                        type="button"
+                        title="You have already booked a doctor for this search entry."
+                        className="rounded-lg border border-slate-200 bg-slate-200/80 px-3 py-1.5 text-xs font-semibold text-slate-400 cursor-not-allowed opacity-80"
+                      >
+                        1 Booked Max
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onBookDoctor(doc);
+                        }}
+                        className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                      >
+                        Book Now
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -622,7 +764,7 @@ export default function Dashboard() {
     },
   ]);
   const [missingInfo, setMissingInfo] = useState('Symptoms and city or area');
-  const [mapCenter, setMapCenter] = useState([12.9716, 77.5946]);
+  const [mapCenter, setMapCenter] = useState(null);
   const [mapCity, setMapCity] = useState('Bangalore');
   const [doctors, setDoctors] = useState([]);
   const [isRouting, setIsRouting] = useState(false);
@@ -634,52 +776,191 @@ export default function Dashboard() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [bookedDoctorId, setBookedDoctorId] = useState(null);
 
-  const [locationMode, setLocationMode]       = useState('chat'); // 'home' | 'gps' | 'chat'
-  const [homeCoords, setHomeCoords]           = useState(null);
-  const [homeLabel, setHomeLabel]             = useState('');
-  const [patientCoords, setPatientCoords]     = useState(null);
-  const [locationStatus, setLocationStatus]   = useState('');
+  const [activeRoute, setActiveRoute]   = useState(null);   // GeoJSON LineString geometry
+  const [routeInfo, setRouteInfo]       = useState(null);   // { distanceKm, durationMins }
+  const [routeLoading, setRouteLoading] = useState(false);  // true while OSRM fetches
+
+  const [locationMode, setLocationMode] = useState('live'); // 'home' | 'live'
+  const [homeLocation, setHomeLocation] = useState(null); // { lat, lng, label } loaded from profile
+  const [patientCoords, setPatientCoords] = useState(null);
+  const [locationStatus, setLocationStatus] = useState('');
+  const [patientPin, setPatientPin] = useState(null); // { lat, lng, label } — visible red pin on map
 
   // Load patient home location from profile on mount
   useEffect(() => {
     api.get('/api/patient/profile').then((res) => {
-      const profile = res.data;
-      if (profile && profile.city) {
-        setHomeLabel(
-          profile.address
-            ? `${profile.address}, ${profile.city}`
-            : profile.city
-        );
-        if (profile.lat && profile.lng) {
-          setHomeCoords({ lat: parseFloat(profile.lat), lng: parseFloat(profile.lng) });
+      const p = res.data;
+      if (p) {
+        const label = p.address
+          ? `${p.address}, ${p.city || ''}`
+          : p.city || '';
+        
+        // Check for specific area match in address (e.g. Indiranagar)
+        const specificAreaCoords = resolveCoordinates(p.address, null);
+        if (specificAreaCoords) {
+          setHomeLocation({
+            lat: specificAreaCoords[0],
+            lng: specificAreaCoords[1],
+            label: label || 'Home Location',
+          });
+        } else if (p.lat && p.lng) {
+          setHomeLocation({
+            lat: parseFloat(p.lat),
+            lng: parseFloat(p.lng),
+            label: label || 'Home Location',
+          });
         } else {
-          const cityCoord = CITY_COORDS[profile.city];
-          if (cityCoord) {
-            setHomeCoords({ lat: cityCoord[0], lng: cityCoord[1] });
+          const coords = resolveCoordinates(p.address, p.city);
+          if (coords) {
+            setHomeLocation({
+              lat: coords[0],
+              lng: coords[1],
+              label: label || p.city || 'Home Location',
+            });
+          } else {
+            setHomeLocation({
+              lat: null,
+              lng: null,
+              label: label || p.city || 'Home Location',
+            });
           }
         }
       }
     }).catch(() => {});
   }, []);
 
-  const handleGetLocation = () => {
+  const handleLiveLocation = () => {
+    setLocationStatus('Detecting...');
     if (!navigator.geolocation) {
       setLocationStatus('Geolocation not supported by your browser');
       return;
     }
-    setLocationStatus('Detecting...');
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setPatientCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        const coords = {
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+        };
+        setPatientCoords(coords);
         setLocationStatus('📍 Live location ready');
-        setMapCenter([pos.coords.latitude, pos.coords.longitude]);
+        setMapCenter([coords.lat, coords.lng]);
+        // Scenario 2: update patient pin to real GPS coords
+        const pin = {
+          lat:   coords.lat,
+          lng:   coords.lng,
+          label: '📍 Your Live Location',
+        };
+        setPatientPin(pin);
+        if (doctors.length > 0) {
+          fetchRoute(selectedDoctor || doctors[0], pin);
+        }
       },
       () => {
-        setLocationStatus('Could not detect — check browser permissions');
         setPatientCoords(null);
+        setLocationStatus('Using city from your message');
       },
       { timeout: 8000 }
     );
+  };
+
+  // Fetch a real road route from OSRM between patient and a selected doctor
+  const fetchRoute = async (doctor, customPin = null) => {
+    if (!doctor) return;
+
+    // Resolve patient coordinates from any available source
+    const activePin = customPin || patientPin;
+    const patLat =
+      activePin?.lat ??
+      (locationMode === 'home' ? homeLocation?.lat : patientCoords?.lat) ??
+      homeLocation?.lat ??
+      patientCoords?.lat ??
+      (mapCenter ? mapCenter[0] : null);
+
+    const patLng =
+      activePin?.lng ??
+      (locationMode === 'home' ? homeLocation?.lng : patientCoords?.lng) ??
+      homeLocation?.lng ??
+      patientCoords?.lng ??
+      (mapCenter ? mapCenter[1] : null);
+
+    let docLat = doctor.lat;
+    let docLng = doctor.lng;
+    if (!docLat || !docLng || (docLat === 0 && docLng === 0)) {
+      const docCoords = resolveCoordinates(doctor.address, doctor.city || mapCity);
+      if (docCoords) {
+        docLat = docCoords[0];
+        docLng = docCoords[1];
+      } else if (mapCenter) {
+        docLat = mapCenter[0];
+        docLng = mapCenter[1];
+      }
+    }
+
+    // Guard: skip if either endpoint cannot be resolved
+    if (!patLat || !patLng || !docLat || !docLng) {
+      setActiveRoute(null);
+      setRouteInfo(null);
+      return;
+    }
+
+    setRouteLoading(true);
+    setSelectedDoctor(doctor);
+
+    try {
+      const url =
+        `https://router.project-osrm.org/route/v1/driving/` +
+        `${patLng},${patLat};${docLng},${docLat}` +
+        `?overview=full&geometries=geojson`;
+
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+        const route = data.routes[0];
+        setActiveRoute(route.geometry);
+        setRouteInfo({
+          distanceKm: (route.distance / 1000).toFixed(1),
+          durationMins: Math.ceil(route.duration / 60),
+        });
+      } else {
+        // Fallback straight-line polyline if driving route calculation is unavailable
+        setActiveRoute({
+          type: 'LineString',
+          coordinates: [
+            [patLng, patLat],
+            [docLng, docLat],
+          ],
+        });
+        const distKm = calculateDistance(patLat, patLng, docLat, docLng).toFixed(1);
+        setRouteInfo({
+          distanceKm: distKm,
+          durationMins: Math.ceil((distKm / 30) * 60) || 5,
+        });
+      }
+    } catch {
+      // Fallback straight-line polyline on network error or offline OSRM
+      setActiveRoute({
+        type: 'LineString',
+        coordinates: [
+          [patLng, patLat],
+          [docLng, docLat],
+        ],
+      });
+      const distKm = calculateDistance(patLat, patLng, docLat, docLng).toFixed(1);
+      setRouteInfo({
+        distanceKm: distKm,
+        durationMins: Math.ceil((distKm / 30) * 60) || 5,
+      });
+    } finally {
+      setRouteLoading(false);
+    }
+  };
+
+  const clearRoute = () => {
+    setActiveRoute(null);
+    setRouteInfo(null);
+    setSelectedDoctor(null);
+    setRouteLoading(false);
   };
 
   const handleBookDoctor = (doctor) => {
@@ -732,17 +1013,18 @@ export default function Dashboard() {
     setBookedDoctorId(null); // Reset single booking lock for fresh search entry
 
     // Resolve which coords to send based on active mode
-    const resolvedLat = locationMode === 'gps'  ? patientCoords?.lat
-                      : locationMode === 'home' ? homeCoords?.lat
-                      : null; // 'chat' mode — backend uses NLP or profile fallback
+    const resolvedLat = locationMode === 'home'
+      ? homeLocation?.lat
+      : patientCoords?.lat ?? null;
 
-    const resolvedLng = locationMode === 'gps'  ? patientCoords?.lng
-                      : locationMode === 'home' ? homeCoords?.lng
-                      : null;
+    const resolvedLng = locationMode === 'home'
+      ? homeLocation?.lng
+      : patientCoords?.lng ?? null;
 
     try {
       const response = await api.post('/process', {
         text: userText,
+        message: userText,
         session_id: sessionIdRef.current,
         patient_lat: resolvedLat ?? null,
         patient_lng: resolvedLng ?? null,
@@ -751,8 +1033,10 @@ export default function Dashboard() {
 
       setMessages((prev) => [...prev, { sender: 'bot', text: data.reply }]);
 
+      let currentCenter = mapCenter;
       if (data.city && CITY_COORDS[data.city]) {
-        setMapCenter(CITY_COORDS[data.city]);
+        currentCenter = CITY_COORDS[data.city];
+        setMapCenter(currentCenter);
         setMapCity(data.area || data.city);
       }
 
@@ -762,10 +1046,40 @@ export default function Dashboard() {
         setMissingInfo(null);
       }
 
+      let activePin = patientPin;
+      if (locationMode === 'home' && homeLocation && homeLocation.lat && homeLocation.lng) {
+        activePin = {
+          lat:   homeLocation.lat,
+          lng:   homeLocation.lng,
+          label: `🏠 ${homeLocation.label}`,
+        };
+        setPatientPin(activePin);
+      } else if (locationMode === 'live' && !patientCoords) {
+        // Scenario 1: typed address — GPS not active, use NLP-resolved coords echoed back
+        const nlpLat = data.patient_lat || null;
+        const nlpLng = data.patient_lng || null;
+        if (nlpLat && nlpLng) {
+          activePin = {
+            lat:   nlpLat,
+            lng:   nlpLng,
+            label: data.area
+              ? `${data.area}, ${data.city}`
+              : data.city || 'Your Location',
+          };
+          setPatientPin(activePin);
+        }
+      }
+
+      clearRoute(); // Clear previous route on new search
       const sorted = (data.doctors || []).sort((a, b) =>
         (a.distance_km ?? Infinity) - (b.distance_km ?? Infinity)
       );
       setDoctors(sorted);
+
+      // Automatically highlight route to the nearest matched doctor
+      if (sorted.length > 0) {
+        fetchRoute(sorted[0], activePin);
+      }
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -853,60 +1167,70 @@ export default function Dashboard() {
               </span>
             </div>
 
-            {/* Location Mode Switcher */}
+            {/* Location Mode Toggle */}
             <div style={{
               display: 'flex', gap: '8px',
               marginBottom: '10px', flexWrap: 'wrap'
             }}>
-              {/* Home Address Button */}
+              {/* Home Mode */}
               <button
                 type="button"
-                onClick={() => setLocationMode('home')}
-                disabled={!homeCoords}
+                onClick={() => {
+                  setLocationMode('home');
+                  // Scenario 3: update patient pin to saved home location
+                  if (homeLocation && homeLocation.lat && homeLocation.lng) {
+                    const pin = {
+                      lat:   homeLocation.lat,
+                      lng:   homeLocation.lng,
+                      label: `🏠 ${homeLocation.label}`,
+                    };
+                    setPatientPin(pin);
+                    setMapCenter([homeLocation.lat, homeLocation.lng]);
+                    if (doctors.length > 0) {
+                      fetchRoute(selectedDoctor || doctors[0], pin);
+                    }
+                  }
+                }}
+                disabled={!homeLocation}
                 style={{
-                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
-                  fontWeight: '500', cursor: homeCoords ? 'pointer' : 'not-allowed',
+                  padding: '6px 16px',
+                  borderRadius: '20px',
                   border: '1px solid',
                   borderColor: locationMode === 'home' ? '#1D9E75' : '#D1D5DB',
                   background: locationMode === 'home' ? '#E1F5EE' : 'transparent',
-                  color:  locationMode === 'home' ? '#0F6E56' : '#6B7280',
-                  opacity: homeCoords ? 1 : 0.6
+                  color: locationMode === 'home' ? '#0F6E56' : '#6B7280',
+                  fontWeight: '500', fontSize: '13px',
+                  cursor: homeLocation ? 'pointer' : 'not-allowed',
+                  opacity: homeLocation ? 1 : 0.5
                 }}
               >
-                🏠 {homeLabel || 'Home Address'}
+                🏠 {homeLocation ? homeLocation.label : 'Set Home in Profile'}
               </button>
 
-              {/* Live GPS Button */}
+              {/* Live Mode */}
               <button
                 type="button"
-                onClick={() => { setLocationMode('gps'); handleGetLocation(); }}
+                onClick={() => {
+                  setLocationMode('live');
+                  setPatientPin(null); // clear home pin before GPS detects
+                  handleLiveLocation();
+                }}
                 style={{
-                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
-                  fontWeight: '500', cursor: 'pointer', border: '1px solid',
-                  borderColor: locationMode === 'gps' ? '#1D9E75' : '#D1D5DB',
-                  background: locationMode === 'gps' ? '#E1F5EE' : 'transparent',
-                  color:  locationMode === 'gps' ? '#0F6E56' : '#6B7280',
+                  padding: '6px 16px',
+                  borderRadius: '20px',
+                  border: '1px solid',
+                  borderColor: locationMode === 'live' ? '#1D9E75' : '#D1D5DB',
+                  background: locationMode === 'live' ? '#E1F5EE' : 'transparent',
+                  color: locationMode === 'live' ? '#0F6E56' : '#6B7280',
+                  fontWeight: '500', fontSize: '13px',
+                  cursor: 'pointer'
                 }}
               >
-                📍 {locationMode === 'gps' && patientCoords ? 'Live On' : 'Live Location'}
+                📍 {locationMode === 'live' && patientCoords
+                  ? 'Live On'
+                  : 'Live Location'}
               </button>
 
-              {/* Chat / Typed Location Button */}
-              <button
-                type="button"
-                onClick={() => setLocationMode('chat')}
-                style={{
-                  padding: '6px 14px', borderRadius: '20px', fontSize: '13px',
-                  fontWeight: '500', cursor: 'pointer', border: '1px solid',
-                  borderColor: locationMode === 'chat' ? '#1D9E75' : '#D1D5DB',
-                  background: locationMode === 'chat' ? '#E1F5EE' : 'transparent',
-                  color:  locationMode === 'chat' ? '#0F6E56' : '#6B7280',
-                }}
-              >
-                💬 Typed Location
-              </button>
-
-              {/* Status message */}
               {locationStatus && (
                 <span style={{ fontSize: '12px', color: '#9CA3AF', alignSelf: 'center' }}>
                   {locationStatus}
@@ -962,46 +1286,77 @@ export default function Dashboard() {
               onToggle={() => setIsDoctorsPanelCollapsed((prev) => !prev)}
               onBookDoctor={handleBookDoctor}
               bookedDoctorId={bookedDoctorId}
+              selectedDoctorId={selectedDoctor?.id}
+              onSelectDoctor={fetchRoute}
             />
           </div>
 
-          <MapContainer center={mapCenter} zoom={13} className="h-full w-full" style={{ zIndex: 0 }}>
+          <MapContainer
+            center={mapCenter || INDIA_CENTER}
+            zoom={mapCenter ? 12 : 5}
+            minZoom={INDIA_MIN_ZOOM}
+            maxZoom={INDIA_MAX_ZOOM}
+            maxBounds={INDIA_BOUNDS}
+            maxBoundsViscosity={1.0}
+            style={{ height: "100%", width: "100%" }}
+          >
             <TileLayer
-              attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+              attribution='© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+              bounds={INDIA_BOUNDS}
             />
 
             {doctors.map((doc) => {
               let markerLat = doc.lat;
               let markerLng = doc.lng;
               if (!markerLat || !markerLng || (markerLat === 0 && markerLng === 0)) {
-                const fallback = CITY_COORDS[mapCity] || mapCenter;
+                const fallback = CITY_COORDS[mapCity] || mapCenter || INDIA_CENTER;
                 markerLat = fallback[0];
                 markerLng = fallback[1];
               }
               const isThisDoctorBooked = bookedDoctorId === doc.id;
               const isSearchLocked = bookedDoctorId !== null;
+              const isSelected = selectedDoctor?.id === doc.id;
 
               return (
-                <Marker key={doc.id} position={[markerLat, markerLng]}>
+                <Marker
+                  key={doc.id}
+                  position={[markerLat, markerLng]}
+                  eventHandlers={{ click: () => fetchRoute(doc) }}
+                >
                   <Popup>
-                    <div className="text-sm">
-                      <p className="font-bold">{doc.name}</p>
-                      <p className="text-blue-600">{doc.specialty}</p>
-                      <p className="mt-1 text-xs text-slate-500">{doc.address}</p>
+                    <div style={{ minWidth: '180px' }}>
+                      <b style={{ fontSize: '14px' }}>{doc.name}</b>
+                      <p style={{ margin: '4px 0', color: '#6B7280', fontSize: '13px' }}>
+                        {doc.specialty}
+                      </p>
+                      <p style={{ margin: '4px 0', fontSize: '12px' }}>{doc.address}</p>
+
                       {Boolean(doc.distance_km && doc.distance_km > 0) && (
-                        <span
-                          style={{
-                            fontSize: "12px",
-                            color: "#1D9E75",
-                            fontWeight: "500",
-                            marginTop: "4px",
-                            display: "block",
-                          }}
-                        >
+                        <p style={{ margin: '4px 0', color: '#1D9E75', fontSize: '12px', fontWeight: '500' }}>
                           📍 {doc.distance_km} km away
-                        </span>
+                        </p>
                       )}
+
+                      {/* OSRM route info — only shows on the selected doctor's popup */}
+                      {isSelected && routeLoading && (
+                        <p style={{ margin: '6px 0 2px', fontSize: '12px', color: '#9CA3AF' }}>
+                          🗺️ Calculating route...
+                        </p>
+                      )}
+                      {isSelected && routeInfo && (
+                        <div style={{
+                          marginTop: '8px', padding: '6px 10px',
+                          background: '#E1F5EE', borderRadius: '8px',
+                          fontSize: '12px', color: '#085041',
+                        }}>
+                          🛣️ {routeInfo.distanceKm} km by road
+                          &nbsp;·&nbsp;
+                          🕐 ~{routeInfo.durationMins} mins
+                        </div>
+                      )}
+
+                      {/* Booking controls */}
                       {isThisDoctorBooked ? (
                         <span className="mt-2 block w-full text-center rounded border border-green-200 bg-green-100 py-1 text-xs font-bold text-green-700">
                           ✓ Booked
@@ -1021,6 +1376,21 @@ export default function Dashboard() {
                           Book Now
                         </button>
                       )}
+
+                      {/* Clear route button — only shown when a route is active for this doctor */}
+                      {isSelected && routeInfo && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); clearRoute(); }}
+                          style={{
+                            marginTop: '8px', width: '100%', padding: '5px',
+                            borderRadius: '6px', border: '1px solid #D1D5DB',
+                            background: 'transparent', fontSize: '12px',
+                            color: '#6B7280', cursor: 'pointer',
+                          }}
+                        >
+                          ✕ Clear Route
+                        </button>
+                      )}
                     </div>
                   </Popup>
                 </Marker>
@@ -1028,6 +1398,33 @@ export default function Dashboard() {
             })}
 
             <RecenterMap coords={mapCenter} />
+
+            {/* OSRM Route Layer — green polyline following real roads */}
+            {activeRoute && <RouteLayer geometry={activeRoute} />}
+
+            {/* Patient Location Pin — red, always on top of doctor pins */}
+            {patientPin && patientPin.lat && patientPin.lng && (
+              <Marker
+                position={[patientPin.lat, patientPin.lng]}
+                icon={patientIcon}
+                zIndexOffset={1000}
+              >
+                <Popup>
+                  <div style={{ minWidth: '160px' }}>
+                    <b style={{ fontSize: '13px', color: '#DC2626' }}>
+                      Your Location
+                    </b>
+                    <p style={{
+                      margin: '4px 0 0',
+                      fontSize: '12px',
+                      color: '#6B7280',
+                    }}>
+                      {patientPin.label}
+                    </p>
+                  </div>
+                </Popup>
+              </Marker>
+            )}
           </MapContainer>
         </section>
       </main>

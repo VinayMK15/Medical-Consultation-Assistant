@@ -1,7 +1,7 @@
 import React, { useState, useContext } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { AuthContext } from '../context/AuthContext';
-import ForgotPasswordModal from '../components/ForgotPasswordModal';
+import { AuthContext } from '../../shared/context/AuthContext';
+import ForgotPasswordModal from './components/ForgotPasswordModal';
 
 const providerHighlights = [
   'Review routed patient requests',

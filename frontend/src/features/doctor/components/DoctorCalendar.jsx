@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import api from '../utils/api';
+import api from '../../../shared/utils/api';
 
 /** Helper to generate calendar grid dates for a given year/month. */
 function generateCalendarDays(year, month) {

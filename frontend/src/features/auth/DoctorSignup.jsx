@@ -1,24 +1,8 @@
 import React, { useState, useContext } from 'react';
 import { Link } from 'react-router-dom';
-import { AuthContext } from '../context/AuthContext';
+import { AuthContext } from '../../shared/context/AuthContext';
+import { SPECIALIZATIONS } from '../../shared/constants/specializations';
 
-const SPECIALIZATIONS = [
-  'General Physician',
-  'Pediatrician',
-  'Dermatologist',
-  'Cardiologist',
-  'Neurologist',
-  'Pulmonologist',
-  'Orthopedic Surgeon',
-  'Psychiatrist',
-  'Gynecologist',
-  'Oncologist',
-  'Ophthalmologist',
-  'ENT Specialist',
-  'Endocrinologist',
-  'Urologist',
-  'Gastroenterologist',
-];
 
 const providerSteps = [
   'Submit provider profile',

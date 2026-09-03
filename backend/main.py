@@ -181,6 +181,7 @@ def haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 def get_patient_coords(city: str | None, area: str | None) -> tuple[float | None, float | None]:
     """
     Look up patient coordinates checking area first, falling back to city.
+    Supports substring matching so 'No. 45, 5th Cross, Indiranagar' matches 'Indiranagar'.
     Returns (lat, lng) or (None, None) if neither found. Never raises an exception.
     """
     try:
@@ -190,11 +191,18 @@ def get_patient_coords(city: str | None, area: str | None) -> tuple[float | None
             area_clean = area.strip().lower()
             if area_clean in coords_map:
                 return coords_map[area_clean]
+            # Match known area/locality substrings (e.g., "Indiranagar" in "No. 45, 5th Cross, Indiranagar")
+            for known_area, coords in coords_map.items():
+                if known_area in area_clean:
+                    return coords
 
         if city and isinstance(city, str):
             city_clean = city.strip().lower()
             if city_clean in coords_map:
                 return coords_map[city_clean]
+            for known_city, coords in coords_map.items():
+                if known_city in city_clean:
+                    return coords
 
         return (None, None)
     except Exception:
@@ -407,6 +415,16 @@ def find_doctors(
             else:
                 results = [to_dict(d) for d in city_pool_q.limit(3).all()]
 
+        # Deduplicate doctors with identical name, specialty, and address
+        seen_keys = set()
+        deduped = []
+        for d in results:
+            key = (d["name"].strip().lower(), d["specialty"].strip().lower(), (d.get("address") or "").strip().lower())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(d)
+        results = deduped
+
         if patient_lat is not None and patient_lng is not None:
             for doc_dict in results:
                 doc_dict["distance_km"] = haversine(
@@ -442,8 +460,9 @@ def process_message(
     db: Session = Depends(get_db),
 ):
     session_id = msg.session_id
+    raw_text = msg.text or msg.message or ""
 
-    english_text, user_lang = detect_and_translate_to_english(msg.text)
+    english_text, user_lang = detect_and_translate_to_english(raw_text)
     extracted = extract_medical_info(english_text)
 
     if session_id not in sessions:
@@ -466,15 +485,31 @@ def process_message(
 
     doctors = []
     # Location Resolution Priority Chain:
-    # Priority 1: Live GPS from frontend
-    # Priority 2: Saved home location from patient profile (coords -> city/address lookup)
-    # Priority 3: NLP extracted location from message
+    # Priority 1: Live GPS or coordinates sent from frontend
+    # Priority 2: Saved home location from patient profile
+    # Priority 3: NLP extracted city/area from message
     if msg.patient_lat is not None and msg.patient_lng is not None:
         patient_lat = msg.patient_lat
         patient_lng = msg.patient_lng
         if not extracted_city and current_user and getattr(current_user, "city", None):
             extracted_city = current_user.city
             city = current_user.city
+            if not extracted_area and getattr(current_user, "address", None):
+                extracted_area = current_user.address
+                area = current_user.address
+        elif not extracted_city:
+            # Check nearest city within supported areas
+            closest_city = None
+            min_dist = float("inf")
+            for c_name in ["Bangalore", "Mumbai", "Delhi", "Chennai", "Hyderabad", "Pune", "Kolkata"]:
+                c_lat, c_lng = CITY_AREA_COORDS[c_name]
+                dist = haversine(patient_lat, patient_lng, c_lat, c_lng)
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_city = c_name
+            if closest_city and min_dist < 100:
+                extracted_city = closest_city
+                city = closest_city
     elif (
         current_user
         and getattr(current_user, "lat", None) is not None
@@ -493,17 +528,20 @@ def process_message(
         and getattr(current_user, "city", None) is not None
         and str(current_user.city).strip() != ""
     ):
+        patient_lat, patient_lng = get_patient_coords(
+            current_user.city, getattr(current_user, "address", None)
+        )
         if not extracted_city:
             extracted_city = current_user.city
             city = current_user.city
         if not extracted_area and getattr(current_user, "address", None):
             extracted_area = current_user.address
             area = current_user.address
-        patient_lat, patient_lng = get_patient_coords(
-            current_user.city, getattr(current_user, "address", None)
-        )
     else:
-        patient_lat, patient_lng = get_patient_coords(extracted_city, extracted_area)
+        patient_lat, patient_lng = get_patient_coords(
+            extracted_city,
+            extracted_area
+        )
 
     display_location = extracted_area or extracted_city
 
@@ -550,4 +588,6 @@ def process_message(
         "city": city,
         "area": area,
         "doctors": doctors,
+        "patient_lat": patient_lat,
+        "patient_lng": patient_lng,
     }
