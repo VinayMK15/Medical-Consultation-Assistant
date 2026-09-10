@@ -6,8 +6,8 @@ from sqlalchemy.exc import IntegrityError
 
 import schemas
 from database import get_db
-from models import User, Appointment
-from auth_utils import get_current_user
+from models import User, Doctor, Appointment
+from auth_utils import get_current_user, get_current_patient
 from utils import generate_time_slots
 from services.email_service import send_booking_confirmation, send_cancellation_notice
 
@@ -23,16 +23,10 @@ def get_available_slots(
 ):
     """
     Return all un-booked 30-minute slots for the given doctor on the given date.
-
-    Logic:
-      1. Look up the doctor's shift_start / shift_end.
-      2. Generate every possible 30-min slot in that window.
-      3. Subtract slots that are already booked on that date.
-      4. Return the remaining slots sorted chronologically.
     """
-    # --- 1. Validate doctor ---
-    doctor = db.query(User).filter(User.id == doctor_id).first()
-    if not doctor or doctor.role != "doctor":
+    # 1. Validate doctor
+    doctor = db.query(Doctor).filter(Doctor.id == doctor_id).first()
+    if not doctor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Doctor not found.",
@@ -41,7 +35,7 @@ def get_available_slots(
     shift_start = doctor.shift_start or "09:00"
     shift_end = doctor.shift_end or "17:00"
 
-    # --- 2. Parse the requested date ---
+    # 2. Parse the requested date
     try:
         requested_date = date_type.fromisoformat(date)
     except (ValueError, TypeError):
@@ -50,7 +44,7 @@ def get_available_slots(
             detail="Invalid date format. Use YYYY-MM-DD.",
         )
 
-    # --- 3. Check for vacations/blocked dates ---
+    # 3. Check for vacations/blocked dates
     if doctor.blocked_dates and date in doctor.blocked_dates:
         return {
             "doctor_id": doctor_id,
@@ -66,7 +60,7 @@ def get_available_slots(
             "message": f"Dr. {doctor.full_name} is on vacation on this date.",
         }
 
-    # --- 4. Generate all possible slots ---
+    # 4. Generate all possible slots
     try:
         total_slots = generate_time_slots(shift_start, shift_end)
     except ValueError as exc:
@@ -75,20 +69,20 @@ def get_available_slots(
             detail=f"Cannot generate slots: {exc}",
         )
 
-    # --- 4. Query already-booked slots for this doctor + date ---
+    # 5. Query already-booked slots for this doctor + date
     booked_appointments = (
         db.query(Appointment)
         .filter(
             Appointment.doctor_id == doctor_id,
             Appointment.appointment_date == requested_date,
-            Appointment.status != "Cancelled",  # ignore cancelled bookings
+            Appointment.status != "Cancelled",
         )
         .all()
     )
     booked_slots = {appt.slot_time for appt in booked_appointments}
 
     # Also subtract slots where the current patient already has an appointment
-    if current_user and current_user.role == "patient":
+    if current_user and getattr(current_user, "id", None) and isinstance(current_user, User):
         patient_appointments = (
             db.query(Appointment)
             .filter(
@@ -100,7 +94,6 @@ def get_available_slots(
         )
         booked_slots.update({appt.slot_time for appt in patient_appointments})
 
-    # --- 5. Subtract & sort ---
     available_slots = sorted(set(total_slots) - booked_slots)
     booked_slots_list = sorted(list(booked_slots))
 
@@ -122,18 +115,12 @@ def get_available_slots(
 def create_appointment(
     appointment: schemas.AppointmentCreate,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_patient: User = Depends(get_current_patient),
+    db: Session = Depends(get_db),
 ):
-    if current_user.role != "patient":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Only patients can book appointments."
-        )
-
-    # --- Validate doctor exists, is a doctor, and is verified ---
-    doctor = db.query(User).filter(User.id == appointment.doctor_id).first()
-    if not doctor or doctor.role != "doctor":
+    # Validate doctor exists, is verified, and is active
+    doctor = db.query(Doctor).filter(Doctor.id == appointment.doctor_id).first()
+    if not doctor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Doctor not found.",
@@ -143,22 +130,27 @@ def create_appointment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This doctor is not yet verified and cannot accept appointments.",
         )
+    if not doctor.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This doctor is currently inactive.",
+        )
 
-    # --- Reject past dates ---
+    # Reject past dates
     if appointment.appointment_date < date_type.today():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot book appointments in the past.",
         )
 
-    # --- Check if Doctor is on Vacation ---
+    # Check if Doctor is on Vacation
     if doctor.blocked_dates and appointment.appointment_date.isoformat() in doctor.blocked_dates:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Dr. {doctor.full_name} is on vacation on {appointment.appointment_date} and cannot accept appointments.",
         )
 
-    # --- Validate slot falls within doctor's shift window ---
+    # Validate slot falls within doctor's shift window
     shift_start = doctor.shift_start or "09:00"
     shift_end = doctor.shift_end or "17:00"
     if appointment.slot_time < shift_start or appointment.slot_time >= shift_end:
@@ -170,7 +162,7 @@ def create_appointment(
             ),
         )
 
-    # --- Double-booking guard for Doctor ---
+    # Double-booking guard for Doctor
     existing_doctor_appt = (
         db.query(Appointment)
         .filter(
@@ -191,11 +183,11 @@ def create_appointment(
             ),
         )
 
-    # --- Double-booking guard for Patient ---
+    # Double-booking guard for Patient
     existing_patient_appt = (
         db.query(Appointment)
         .filter(
-            Appointment.patient_id == current_user.id,
+            Appointment.patient_id == current_patient.id,
             Appointment.appointment_date == appointment.appointment_date,
             Appointment.slot_time == appointment.slot_time,
             Appointment.status != "Cancelled",
@@ -212,12 +204,12 @@ def create_appointment(
         )
 
     new_appointment = Appointment(
-        patient_id=current_user.id,
+        patient_id=current_patient.id,
         doctor_id=appointment.doctor_id,
         appointment_date=appointment.appointment_date,
         slot_time=appointment.slot_time,
         symptoms_summary=appointment.symptoms_summary,
-        status="Pending"
+        status="Pending",
     )
 
     try:
@@ -238,15 +230,15 @@ def create_appointment(
     # Fire background email task
     background_tasks.add_task(
         send_booking_confirmation,
-        patient_email=current_user.email,
+        patient_email=current_patient.email,
         doctor_email=doctor.email,
         details={
-            "patient_name": current_user.full_name,
+            "patient_name": current_patient.full_name,
             "doctor_name": doctor.full_name,
             "specialty": doctor.specialization,
             "date": str(appointment.appointment_date),
             "time": appointment.slot_time,
-        }
+        },
     )
 
     return new_appointment
@@ -256,13 +248,12 @@ def create_appointment(
 def cancel_appointment(
     appointment_id: int,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_patient: User = Depends(get_current_patient),
+    db: Session = Depends(get_db),
 ):
-    # Find the appointment ensuring the current user is the patient
     appt = db.query(Appointment).filter(
         Appointment.id == appointment_id,
-        Appointment.patient_id == current_user.id
+        Appointment.patient_id == current_patient.id,
     ).first()
 
     if not appt:
@@ -273,20 +264,19 @@ def cancel_appointment(
 
     appt.status = "Cancelled"
     db.commit()
-    
-    # Get doctor to find their email
-    doctor = db.query(User).filter(User.id == appt.doctor_id).first()
+
+    doctor = db.query(Doctor).filter(Doctor.id == appt.doctor_id).first()
     if doctor:
         background_tasks.add_task(
             send_cancellation_notice,
-            patient_email=current_user.email,
+            patient_email=current_patient.email,
             doctor_email=doctor.email,
             details={
-                "patient_name": current_user.full_name,
+                "patient_name": current_patient.full_name,
                 "doctor_name": doctor.full_name,
                 "date": str(appt.appointment_date),
                 "time": appt.slot_time,
-            }
+            },
         )
 
     return {"message": "Appointment cancelled successfully."}

@@ -2,12 +2,13 @@ from datetime import date as date_type
 from fastapi import APIRouter, HTTPException, Depends, Query, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import extract
 
 import models
 import schemas
 from database import get_db
-from models import User, Appointment
-from auth_utils import get_current_user
+from models import User, Doctor, Appointment
+from auth_utils import get_current_doctor
 from services.email_service import send_completion_summary
 
 router = APIRouter(prefix="/api/doctor", tags=["Doctor"])
@@ -17,22 +18,14 @@ router = APIRouter(prefix="/api/doctor", tags=["Doctor"])
 def get_doctor_appointments(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(50, ge=1, le=200, description="Max records to return"),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_doctor: Doctor = Depends(get_current_doctor),
+    db: Session = Depends(get_db),
 ):
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only."
-        )
-
-    # Join with User table to get patient name + email in a single query
-    PatientUser = models.User
-
+    # Join with User (patients) to get patient name + email in a single query
     base_q = (
-        db.query(Appointment, PatientUser)
-        .join(PatientUser, Appointment.patient_id == PatientUser.id)
-        .filter(Appointment.doctor_id == current_user.id)
+        db.query(Appointment, User)
+        .join(User, Appointment.patient_id == User.id)
+        .filter(Appointment.doctor_id == current_doctor.id)
     )
 
     total = base_q.count()
@@ -50,10 +43,10 @@ def get_doctor_appointments(
             "status": appt.status,
             "patient_name": patient.full_name or "Unknown Patient",
             "patient_email": patient.email or None,
+            "prescription_notes": appt.prescription_notes,
         })
 
     return {"data": data, "total": total, "skip": skip, "limit": limit}
-
 
 
 @router.patch("/appointments/{appointment_id}/complete")
@@ -61,30 +54,24 @@ def complete_appointment(
     appointment_id: int,
     payload: schemas.AppointmentComplete,
     background_tasks: BackgroundTasks,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    current_doctor: Doctor = Depends(get_current_doctor),
+    db: Session = Depends(get_db),
 ):
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only."
-        )
-
     appt = db.query(Appointment).filter(
         Appointment.id == appointment_id,
-        Appointment.doctor_id == current_user.id
+        Appointment.doctor_id == current_doctor.id,
     ).first()
 
     if not appt:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Appointment not found."
+            detail="Appointment not found.",
         )
 
     if appt.status and appt.status.lower() == "cancelled":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cancelled appointments cannot be marked as completed."
+            detail="Cancelled appointments cannot be marked as completed.",
         )
 
     appt.status = "Completed"
@@ -100,10 +87,10 @@ def complete_appointment(
             patient_email=patient.email,
             details={
                 "patient_name": patient.full_name,
-                "doctor_name": current_user.full_name,
+                "doctor_name": current_doctor.full_name,
                 "prescription_notes": payload.prescription_notes,
                 "date": str(appt.appointment_date),
-            }
+            },
         )
 
     return {"message": "Appointment marked as completed.", "appointment_id": appt.id}
@@ -111,49 +98,48 @@ def complete_appointment(
 
 @router.get("/profile")
 def get_doctor_profile(
-    current_user: User = Depends(get_current_user),
+    current_doctor: Doctor = Depends(get_current_doctor),
     db: Session = Depends(get_db),
 ):
-    """Return the authenticated doctor's profile (including shift times)."""
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only.",
-        )
-
+    """Return the authenticated doctor's profile."""
     return {
-        "id": current_user.id,
-        "email": current_user.email,
-        "full_name": current_user.full_name,
-        "specialization": current_user.specialization,
-        "city": current_user.city,
-        "address": current_user.address,
-        "shift_start": current_user.shift_start or "09:00",
-        "shift_end": current_user.shift_end or "17:00",
-        "is_verified": current_user.is_verified,
+        "id": current_doctor.id,
+        "email": current_doctor.email,
+        "full_name": current_doctor.full_name,
+        "specialization": current_doctor.specialization,
+        "experience_years": current_doctor.experience_years,
+        "qualifications": current_doctor.qualifications,
+        "license_number": current_doctor.license_number,
+        "phone": current_doctor.phone,
+        "city": current_doctor.practice_city,
+        "address": current_doctor.practice_address,
+        "practice_city": current_doctor.practice_city,
+        "practice_address": current_doctor.practice_address,
+        "lat": current_doctor.practice_lat,
+        "lng": current_doctor.practice_lng,
+        "practice_lat": current_doctor.practice_lat,
+        "practice_lng": current_doctor.practice_lng,
+        "consultation_fee": current_doctor.consultation_fee,
+        "bio": current_doctor.bio,
+        "shift_start": current_doctor.shift_start or "09:00",
+        "shift_end": current_doctor.shift_end or "17:00",
+        "slot_duration_minutes": current_doctor.slot_duration_minutes,
+        "blocked_dates": current_doctor.blocked_dates or [],
+        "is_verified": current_doctor.is_verified,
+        "is_active": current_doctor.is_active,
     }
 
 
 @router.put("/schedule")
 def update_doctor_schedule(
     payload: schemas.ScheduleUpdate,
-    current_user: User = Depends(get_current_user),
+    current_doctor: Doctor = Depends(get_current_doctor),
     db: Session = Depends(get_db),
 ):
     """
     Update the authenticated doctor's shift_start and shift_end.
-
-    Validates that:
-      - The user is a doctor.
-      - shift_start is strictly before shift_end.
+    Validates that shift_start is strictly before shift_end.
     """
-    if current_user.role != "doctor":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied: Doctor portal only.",
-        )
-
-    # Logical validation: start must be before end
     if payload.shift_start >= payload.shift_end:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -163,44 +149,40 @@ def update_doctor_schedule(
             ),
         )
 
-    current_user.shift_start = payload.shift_start
-    current_user.shift_end = payload.shift_end
+    current_doctor.shift_start = payload.shift_start
+    current_doctor.shift_end = payload.shift_end
     db.commit()
-    db.refresh(current_user)
+    db.refresh(current_doctor)
 
     return {
         "message": "Schedule updated successfully.",
-        "shift_start": current_user.shift_start,
-        "shift_end": current_user.shift_end,
+        "shift_start": current_doctor.shift_start,
+        "shift_end": current_doctor.shift_end,
     }
 
 
 @router.post("/blocked-dates")
 def toggle_blocked_date(
     payload: schemas.BlockedDateToggle,
-    current_user: User = Depends(get_current_user),
+    current_doctor: Doctor = Depends(get_current_doctor),
     db: Session = Depends(get_db),
 ):
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=403, detail="Doctor portal only.")
-
     try:
         target_date = date_type.fromisoformat(payload.date)
     except (ValueError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid date format. Use YYYY-MM-DD."
+            detail="Invalid date format. Use YYYY-MM-DD.",
         )
 
     if target_date < date_type.today():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot mark past dates as vacation."
+            detail="Cannot mark past dates as vacation.",
         )
 
-    current_blocked = list(current_user.blocked_dates or [])
-    
-    # Toggle logic: if date is already in the list, remove it. Otherwise, add it.
+    current_blocked = list(current_doctor.blocked_dates or [])
+
     if payload.date in current_blocked:
         current_blocked.remove(payload.date)
         action = "unblocked"
@@ -208,20 +190,22 @@ def toggle_blocked_date(
         current_blocked.append(payload.date)
         action = "blocked"
 
-    # Assign a new list and flag_modified to ensure SQLAlchemy detects the change
-    current_user.blocked_dates = current_blocked
-    flag_modified(current_user, "blocked_dates")
+    current_doctor.blocked_dates = current_blocked
+    flag_modified(current_doctor, "blocked_dates")
     db.commit()
-    db.refresh(current_user)
+    db.refresh(current_doctor)
 
-    return {"message": f"Date {payload.date} {action} successfully.", "blocked_dates": current_user.blocked_dates}
+    return {
+        "message": f"Date {payload.date} {action} successfully.",
+        "blocked_dates": current_doctor.blocked_dates,
+    }
 
 
 @router.get("/calendar-summary")
 def get_calendar_summary(
     year: int = Query(...),
     month: int = Query(...),
-    current_user: User = Depends(get_current_user),
+    current_doctor: Doctor = Depends(get_current_doctor),
     db: Session = Depends(get_db),
 ):
     """
@@ -231,25 +215,19 @@ def get_calendar_summary(
       "blocked_dates": ["2026-08-20"]
     }
     """
-    if current_user.role != "doctor":
-        raise HTTPException(status_code=403, detail="Doctor portal only.")
-
-    from sqlalchemy import extract
-
-    # Find all appointments for this doctor in this year/month
     appts = db.query(Appointment).filter(
-        Appointment.doctor_id == current_user.id,
-        extract('year', Appointment.appointment_date) == year,
-        extract('month', Appointment.appointment_date) == month
+        Appointment.doctor_id == current_doctor.id,
+        extract("year", Appointment.appointment_date) == year,
+        extract("month", Appointment.appointment_date) == month,
     ).all()
 
     booked_counts = {}
     for appt in appts:
-        if appt.status != 'Cancelled':
+        if appt.status != "Cancelled":
             date_str = str(appt.appointment_date)
             booked_counts[date_str] = booked_counts.get(date_str, 0) + 1
 
     return {
         "booked_counts": booked_counts,
-        "blocked_dates": current_user.blocked_dates or []
+        "blocked_dates": current_doctor.blocked_dates or [],
     }
