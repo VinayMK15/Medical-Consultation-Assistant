@@ -10,14 +10,16 @@ Registers all routers and middleware. Business logic lives in routers/:
 """
 import os
 import math
-from datetime import date as date_type
+import random
+import logging
+from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
-import random
 from cachetools import TTLCache
 
 from slowapi import _rate_limit_exceeded_handler
@@ -26,27 +28,104 @@ from limiter import limiter
 
 from database import engine, get_db, SessionLocal
 import models
-from models import User
+from models import User, Doctor, AdminUser, SymptomMapping, Specialization
 from schemas import ProcessRequest
 from auth_utils import get_current_user
 from services.translator_logic import detect_and_translate_to_english, translate_from_english
 from services.nlp_processor import extract_medical_info, normalize_city
+from services.geo import resolve_coords_sync, haversine, CITY_AREA_COORDS
 
 from routers import auth, doctor, patient, appointments, admin
 
-import logging
-from contextlib import asynccontextmanager
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Symptom Cache System (DB-backed)
+# ---------------------------------------------------------------------------
+_symptom_cache: Dict[str, str] = {}
+
+
+def load_symptom_cache(db: Optional[Session] = None):
+    """Load all symptom mappings from DB into memory cache."""
+    global _symptom_cache
+    close_db = False
+    if db is None:
+        db = SessionLocal()
+        close_db = True
+    try:
+        mappings = db.query(SymptomMapping).all()
+        _symptom_cache = {m.symptom.lower().strip(): m.specialist for m in mappings}
+        logger.info("Loaded %d symptom mappings into cache.", len(_symptom_cache))
+    except Exception as exc:
+        logger.warning("Could not load symptom cache from DB: %s", exc)
+    finally:
+        if close_db:
+            db.close()
+
+
+def invalidate_symptom_cache():
+    """Reload symptom cache from database."""
+    load_symptom_cache()
+
+
+def save_learned_symptom(symptom: str, specialist: str, added_by: str = "NLP"):
+    """Persist a dynamically learned symptom mapping to DB and cache."""
+    global _symptom_cache
+    symptom_clean = symptom.lower().strip()
+    db = SessionLocal()
+    try:
+        existing = db.query(SymptomMapping).filter(SymptomMapping.symptom == symptom_clean).first()
+        if not existing:
+            mapping = SymptomMapping(
+                symptom=symptom_clean,
+                specialist=specialist,
+                is_custom=True,
+                added_by=added_by,
+            )
+            db.add(mapping)
+            db.commit()
+            _symptom_cache[symptom_clean] = specialist
+    except Exception as exc:
+        logger.warning("Failed to persist learned symptom '%s': %s", symptom, exc)
+    finally:
+        db.close()
+
+
+def get_specialist(symptoms: str) -> str:
+    """Return the best-matching specialist for the given symptom string from DB cache."""
+    global _symptom_cache
+    if not _symptom_cache:
+        load_symptom_cache()
+
+    if not symptoms:
+        return "General Physician"
+    lower = symptoms.lower()
+
+    # Search in DB cache (longest match first)
+    for keyword in sorted(_symptom_cache, key=len, reverse=True):
+        if keyword in lower:
+            return _symptom_cache[keyword]
+
+    return "General Physician"
+
+
+# Eagerly initialize cache on module load
+load_symptom_cache()
+
+
+# ---------------------------------------------------------------------------
+# Lifespan context manager
+# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Startup: validate that Alembic migrations are up to date.
-    Never create tables directly — Alembic owns schema management.
+    Startup:
+      1. Validate Alembic migration state.
+      2. Preload DB-backed symptom cache.
     """
     try:
         alembic_cfg = Config("alembic.ini")
@@ -59,32 +138,31 @@ async def lifespan(app: FastAPI):
 
         if current_revision != head_revision:
             logger.warning(
-                "Database migrations are not up to date. "
-                "Current: %s | Head: %s | "
-                "Run: alembic upgrade head",
+                "Database migrations are not up to date. Current: %s | Head: %s | Run: alembic upgrade head",
                 current_revision,
                 head_revision,
             )
         else:
-            logger.info(
-                "Database schema is up to date at revision: %s",
-                current_revision,
-            )
+            logger.info("Database schema is up to date at revision: %s", current_revision)
     except Exception as e:
         logger.warning("Could not validate Alembic migration state: %s", e)
 
+    # Preload symptom cache
+    load_symptom_cache()
+
     yield  # Application runs here
+
 
 app = FastAPI(title="MedAssist API", version="1.0.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
-# Rate Limiting — shared limiter instance used by all routers
+# Rate Limiting
 # ---------------------------------------------------------------------------
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ---------------------------------------------------------------------------
-# CORS — restrict to known frontend origins (configurable via env var)
+# CORS
 # ---------------------------------------------------------------------------
 _ALLOWED_ORIGINS = os.getenv(
     "CORS_ORIGINS",
@@ -109,245 +187,34 @@ app.include_router(appointments.router)
 app.include_router(admin.router)
 
 # ---------------------------------------------------------------------------
-# TTL session store for NLP chat: max 1000 sessions, each expires after 30 min
+# TTL session store for NLP chat
 # ---------------------------------------------------------------------------
-SESSION_TTL_SECONDS = 60 * 30   # 30 minutes
-SESSION_MAX_SIZE    = 1000
-sessions: TTLCache  = TTLCache(maxsize=SESSION_MAX_SIZE, ttl=SESSION_TTL_SECONDS)
-
-# ---------------------------------------------------------------------------
-# City & Area Coordinates (Latitude, Longitude)
-# ---------------------------------------------------------------------------
-CITY_AREA_COORDS = {
-    # 7 Cities
-    "Bangalore": (12.9716, 77.5946),
-    "Mumbai":    (19.0760, 72.8777),
-    "Delhi":     (28.6139, 77.2090),
-    "Chennai":   (13.0827, 80.2707),
-    "Hyderabad": (17.3850, 78.4867),
-    "Pune":      (18.5204, 73.8567),
-    "Kolkata":   (22.5726, 88.3639),
-
-    # 12 Bangalore areas
-    "Koramangala":     (12.9352, 77.6245),
-    "Indiranagar":     (12.9784, 77.6408),
-    "Jayanagar":       (12.9308, 77.5838),
-    "Whitefield":      (12.9698, 77.7500),
-    "Rajajinagar":     (12.9907, 77.5530),
-    "Banashankari":    (12.9255, 77.5468),
-    "Hebbal":          (13.0354, 77.5972),
-    "Kengeri":         (12.8996, 77.4827),
-    "Marathahalli":    (12.9591, 77.6974),
-    "BTM Layout":      (12.9166, 77.6101),
-    "HSR Layout":      (12.9116, 77.6389),
-    "Electronic City": (12.8399, 77.6770),
-    "Malleswaram":     (12.9997, 77.5713),
-    "Bellandur":       (12.9263, 77.6756),
-    "JP Nagar":        (12.9082, 77.5858),
-    "Yelahanka":       (13.1007, 77.5963),
-
-    # 8 Mumbai areas
-    "Bandra":  (19.0596, 72.8295),
-    "Andheri": (19.1136, 72.8697),
-    "Worli":   (19.0176, 72.8172),
-    "Dadar":   (19.0178, 72.8478),
-    "Powai":   (19.1176, 72.9060),
-    "Juhu":    (19.1075, 72.8263),
-    "Malad":   (19.1874, 72.8484),
-    "Vashi":   (19.0770, 72.9986),
-}
+SESSION_TTL_SECONDS = 60 * 30  # 30 minutes
+SESSION_MAX_SIZE = 1000
+sessions: TTLCache = TTLCache(maxsize=SESSION_MAX_SIZE, ttl=SESSION_TTL_SECONDS)
 
 
-def haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """
-    Calculate distance in kilometers between two lat/lng points using math module.
-    Returns distance rounded to 1 decimal place.
-    """
-    R = 6371.0  # Earth radius in kilometers
+def get_patient_coords(city: Optional[str], area: Optional[str]) -> tuple[Optional[float], Optional[float]]:
+    """Helper forwarding to resolve_coords_sync."""
+    return resolve_coords_sync(city=city, address=area)
 
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-
-    a = (
-        math.sin(dlat / 2.0) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlng / 2.0) ** 2
-    )
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
-    return round(R * c, 1)
-
-
-def get_patient_coords(city: str | None, area: str | None) -> tuple[float | None, float | None]:
-    """
-    Look up patient coordinates checking area first, falling back to city.
-    Supports substring matching so 'No. 45, 5th Cross, Indiranagar' matches 'Indiranagar'.
-    Returns (lat, lng) or (None, None) if neither found. Never raises an exception.
-    """
-    try:
-        coords_map = {k.lower(): v for k, v in CITY_AREA_COORDS.items()}
-
-        if area and isinstance(area, str):
-            area_clean = area.strip().lower()
-            if area_clean in coords_map:
-                return coords_map[area_clean]
-            # Match known area/locality substrings (e.g., "Indiranagar" in "No. 45, 5th Cross, Indiranagar")
-            for known_area, coords in coords_map.items():
-                if known_area in area_clean:
-                    return coords
-
-        if city and isinstance(city, str):
-            city_clean = city.strip().lower()
-            if city_clean in coords_map:
-                return coords_map[city_clean]
-            for known_city, coords in coords_map.items():
-                if known_city in city_clean:
-                    return coords
-
-        return (None, None)
-    except Exception:
-        return (None, None)
 
 # ---------------------------------------------------------------------------
-# Symptom → Medical Specialist mapping
+# Doctor Search Engine (queries Doctor model)
 # ---------------------------------------------------------------------------
-SYMPTOM_SPECIALIST_MAP = {
-    # Cardiology
-    "chest pain":           "Cardiologist",
-    "heart pain":           "Cardiologist",
-    "palpitations":         "Cardiologist",
-    "heart attack":         "Cardiologist",
-    "chest tightness":      "Cardiologist",
-    # Neurology
-    "headache":             "Neurologist",
-    "migraine":             "Neurologist",
-    "seizure":              "Neurologist",
-    "dizziness":            "Neurologist",
-    "numbness":             "Neurologist",
-    "stroke":               "Neurologist",
-    # Pulmonology
-    "cough":                "Pulmonologist",
-    "shortness of breath":  "Pulmonologist",
-    "breathing":            "Pulmonologist",
-    "asthma":               "Pulmonologist",
-    "wheezing":             "Pulmonologist",
-    # Internal Medicine
-    "nausea":               "Internal Medicine",
-    "nauseous":             "Internal Medicine",
-    "stomach pain":         "Internal Medicine",
-    "abdominal pain":       "Internal Medicine",
-    "vomiting":             "Internal Medicine",
-    # General Physician
-    "fever":                "General Physician",
-    "cold":                 "General Physician",
-    "flu":                  "General Physician",
-    "fatigue":              "General Physician",
-    "weakness":             "General Physician",
-    # Orthopedics
-    "broken arm":           "Orthopedic Surgeon",
-    "broke my arm":         "Orthopedic Surgeon",
-    "fracture":             "Orthopedic Surgeon",
-    "broken bone":          "Orthopedic Surgeon",
-    "bone pain":            "Orthopedic Surgeon",
-    "joint pain":           "Orthopedic Surgeon",
-    "knee pain":            "Orthopedic Surgeon",
-    "back pain":            "Orthopedic Surgeon",
-    "backache":             "Orthopedic Surgeon",
-    "neck pain":            "Orthopedic Surgeon",
-    "neckpain":             "Orthopedic Surgeon",
-    "stiff neck":           "Orthopedic Surgeon",
-    "neck stiffness":       "Orthopedic Surgeon",
-    "neck ache":            "Orthopedic Surgeon",
-    "shoulder pain":        "Orthopedic Surgeon",
-    "shoulder ache":        "Orthopedic Surgeon",
-    "sprain":               "Orthopedic Surgeon",
-    "broken leg":           "Orthopedic Surgeon",
-    # Dermatology
-    "rash":                 "Dermatologist",
-    "skin rash":            "Dermatologist",
-    "acne":                 "Dermatologist",
-    "eczema":               "Dermatologist",
-    "psoriasis":            "Dermatologist",
-    "itching":              "Dermatologist",
-    "skin infection":       "Dermatologist",
-    # Pediatrics
-    "child fever":          "Pediatrician",
-    "infant":               "Pediatrician",
-    "baby":                 "Pediatrician",
-    "child rash":           "Pediatrician",
-    # Psychiatry
-    "anxiety":              "Psychiatrist",
-    "depression":           "Psychiatrist",
-    "panic attack":         "Psychiatrist",
-    "mental health":        "Psychiatrist",
-    "insomnia":             "Psychiatrist",
-    "stress":               "Psychiatrist",
-    # Gastroenterology
-    "diarrhea":             "Gastroenterologist",
-    "constipation":         "Gastroenterologist",
-    "bloating":             "Gastroenterologist",
-    "acid reflux":          "Gastroenterologist",
-    "heartburn":            "Gastroenterologist",
-    "ibs":                  "Gastroenterologist",
-    # Endocrinology
-    "diabetes":             "Endocrinologist",
-    "thyroid":              "Endocrinologist",
-    "weight gain":          "Endocrinologist",
-    "hormonal":             "Endocrinologist",
-    # Ophthalmology
-    "eye pain":             "Ophthalmologist",
-    "blurry vision":        "Ophthalmologist",
-    "vision loss":          "Ophthalmologist",
-    "red eye":              "Ophthalmologist",
-    # ENT
-    "ear pain":             "ENT Specialist",
-    "hearing loss":         "ENT Specialist",
-    "sore throat":          "ENT Specialist",
-    "nose bleed":           "ENT Specialist",
-    "sinusitis":            "ENT Specialist",
-    "tonsils":              "ENT Specialist",
-    # Urology
-    "urinary pain":         "Urologist",
-    "kidney stone":         "Urologist",
-    "frequent urination":   "Urologist",
-    # Oncology
-    "cancer":               "Oncologist",
-    "tumor":                "Oncologist",
-    "lump":                 "Oncologist",
-}
-
-
-def get_specialist(symptoms: str) -> str:
-    """Return the best-matching specialist for the given symptom string."""
-    if not symptoms:
-        return "General Physician"
-    lower = symptoms.lower()
-    for keyword in sorted(SYMPTOM_SPECIALIST_MAP, key=len, reverse=True):
-        if keyword in lower:
-            return SYMPTOM_SPECIALIST_MAP[keyword]
-    return "General Physician"
-
-
 def find_doctors(
-    city: str | None,
-    area: str | None,
+    city: Optional[str],
+    area: Optional[str],
     specialist: str,
-    db: Session | None = None,
-    patient_lat: float | None = None,
-    patient_lng: float | None = None,
+    db: Optional[Session] = None,
+    patient_lat: Optional[float] = None,
+    patient_lng: Optional[float] = None,
 ) -> list:
     """
-    Query verified doctors from the database.
-    If patient coordinates are provided, compute distance_km, attach to each doctor dict,
-    and sort doctors list ascending by distance_km.
-
-    Priority:
-      1. Specialist match + city/area match
-      2. General Physician fallback in the same city
-      3. Any verified doctor in the city (top 3)
+    Query verified & active doctors from the Doctor table.
+    Sort by proximity if patient coordinates are available.
     """
-    # Handle parameter overload flexibility:
-    # If 4th positional arg `db` is numeric, caller passed find_doctors(city, area, specialist, patient_lat, patient_lng)
+    # Overload flexibility: if db passed as float/int
     if isinstance(db, (float, int)):
         patient_lng = patient_lat
         patient_lat = db
@@ -362,25 +229,25 @@ def find_doctors(
         close_db_on_exit = True
 
     try:
-        base_q = db.query(User).filter(
-            User.role == "doctor",
-            User.is_verified == True,
+        base_q = db.query(Doctor).filter(
+            Doctor.is_verified == True,
+            Doctor.is_active == True,
         )
 
         def location_filter(q):
             city_lower = city.lower()
-            conditions = [User.city.ilike(f"%{city_lower}%")]
+            conditions = [Doctor.practice_city.ilike(f"%{city_lower}%")]
             if area:
                 area_lower = area.lower()
-                conditions.append(User.address.ilike(f"%{area_lower}%"))
+                conditions.append(Doctor.practice_address.ilike(f"%{area_lower}%"))
             return q.filter(or_(*conditions))
 
-        def to_dict(doc: User) -> dict:
-            lat = doc.lat or 0.0
-            lng = doc.lng or 0.0
+        def to_dict(doc: Doctor) -> dict:
+            lat = doc.practice_lat or 0.0
+            lng = doc.practice_lng or 0.0
 
             if lat == 0.0 or lng == 0.0:
-                doc_address = (doc.address or "").lower()
+                doc_address = (doc.practice_address or "").lower()
                 matched_area = next(
                     (coords for area_name, coords in CITY_AREA_COORDS.items() if area_name.lower() in doc_address),
                     None,
@@ -395,27 +262,30 @@ def find_doctors(
                 lng = base_lng + random.uniform(-0.008, 0.008)
 
             return {
-                "id":        doc.id,
-                "name":      doc.full_name or "Unknown Doctor",
+                "id": doc.id,
+                "name": doc.full_name or "Unknown Doctor",
                 "specialty": doc.specialization or "General Physician",
-                "address":   doc.address or city,
-                "lat":       lat,
-                "lng":       lng,
+                "address": doc.practice_address or doc.practice_city or city,
+                "city": doc.practice_city or city,
+                "lat": lat,
+                "lng": lng,
+                "experience_years": doc.experience_years,
+                "consultation_fee": doc.consultation_fee,
             }
 
         city_pool_q = location_filter(base_q)
 
-        matched = city_pool_q.filter(User.specialization.ilike(specialist)).all()
+        matched = city_pool_q.filter(Doctor.specialization.ilike(specialist)).all()
         if matched:
             results = [to_dict(d) for d in matched]
         else:
-            gp = city_pool_q.filter(User.specialization.ilike("General Physician")).all()
+            gp = city_pool_q.filter(Doctor.specialization.ilike("General Physician")).all()
             if gp:
                 results = [to_dict(d) for d in gp]
             else:
                 results = [to_dict(d) for d in city_pool_q.limit(3).all()]
 
-        # Deduplicate doctors with identical name, specialty, and address
+        # Deduplicate
         seen_keys = set()
         deduped = []
         for d in results:
@@ -443,6 +313,29 @@ class UserMessage(ProcessRequest):
 
 
 # ---------------------------------------------------------------------------
+# Background Map & Exploration Endpoint
+# ---------------------------------------------------------------------------
+@app.get("/api/doctors")
+def get_all_active_doctors(db: Session = Depends(get_db)):
+    """Return all verified & active doctors for background map rendering."""
+    docs = db.query(Doctor).filter(Doctor.is_verified == True, Doctor.is_active == True).all()
+    return [
+        {
+            "id": d.id,
+            "name": d.full_name,
+            "specialty": d.specialization,
+            "city": d.practice_city,
+            "address": d.practice_address,
+            "lat": d.practice_lat or 12.9716,
+            "lng": d.practice_lng or 77.5946,
+            "experience_years": d.experience_years,
+            "consultation_fee": d.consultation_fee,
+        }
+        for d in docs
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Root health check
 # ---------------------------------------------------------------------------
 @app.get("/")
@@ -456,7 +349,7 @@ def read_root():
 @app.post("/process")
 def process_message(
     msg: UserMessage,
-    current_user: User = Depends(get_current_user),
+    current_user: Any = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     session_id = msg.session_id
@@ -477,32 +370,35 @@ def process_message(
         session["area"] = extracted["area"]
 
     symptoms = session["symptoms"]
-    city     = session["city"]
-    area     = session["area"]
+    city = session["city"]
+    area = session["area"]
     extracted_city = city
     extracted_area = area
     specialist = get_specialist(symptoms)
 
     doctors = []
-    # Location Resolution Priority Chain:
-    # Priority 1: Live GPS or coordinates sent from frontend
-    # Priority 2: Saved home location from patient profile
-    # Priority 3: NLP extracted city/area from message
+    patient_lat = None
+    patient_lng = None
+
+    # Priority 1: Live coordinates sent from frontend request
     if msg.patient_lat is not None and msg.patient_lng is not None:
         patient_lat = msg.patient_lat
         patient_lng = msg.patient_lng
-        if not extracted_city and current_user and getattr(current_user, "city", None):
-            extracted_city = current_user.city
-            city = current_user.city
-            if not extracted_area and getattr(current_user, "address", None):
-                extracted_area = current_user.address
-                area = current_user.address
+        user_city = getattr(current_user, "home_city", getattr(current_user, "city", None))
+        user_addr = getattr(current_user, "home_address", getattr(current_user, "address", None))
+
+        if not extracted_city and user_city:
+            extracted_city = user_city
+            city = user_city
+            if not extracted_area and user_addr:
+                extracted_area = user_addr
+                area = user_addr
         elif not extracted_city:
             # Check nearest city within supported areas
             closest_city = None
             min_dist = float("inf")
             for c_name in ["Bangalore", "Mumbai", "Delhi", "Chennai", "Hyderabad", "Pune", "Kolkata"]:
-                c_lat, c_lng = CITY_AREA_COORDS[c_name]
+                c_lat, c_lng = CITY_AREA_COORDS[c_name.lower()]
                 dist = haversine(patient_lat, patient_lng, c_lat, c_lng)
                 if dist < min_dist:
                     min_dist = dist
@@ -510,38 +406,43 @@ def process_message(
             if closest_city and min_dist < 100:
                 extracted_city = closest_city
                 city = closest_city
+
+    # Priority 2: Stored lat/lng from patient profile
     elif (
         current_user
-        and getattr(current_user, "lat", None) is not None
-        and getattr(current_user, "lng", None) is not None
+        and getattr(current_user, "home_lat", getattr(current_user, "practice_lat", getattr(current_user, "lat", None))) is not None
+        and getattr(current_user, "home_lng", getattr(current_user, "practice_lng", getattr(current_user, "lng", None))) is not None
     ):
-        patient_lat = current_user.lat
-        patient_lng = current_user.lng
-        if not extracted_city and getattr(current_user, "city", None):
-            extracted_city = current_user.city
-            city = current_user.city
-        if not extracted_area and getattr(current_user, "address", None):
-            extracted_area = current_user.address
-            area = current_user.address
+        patient_lat = getattr(current_user, "home_lat", getattr(current_user, "practice_lat", getattr(current_user, "lat", None)))
+        patient_lng = getattr(current_user, "home_lng", getattr(current_user, "practice_lng", getattr(current_user, "lng", None)))
+        user_city = getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None)))
+        user_addr = getattr(current_user, "home_address", getattr(current_user, "practice_address", getattr(current_user, "address", None)))
+        if not extracted_city and user_city:
+            extracted_city = user_city
+            city = user_city
+        if not extracted_area and user_addr:
+            extracted_area = user_addr
+            area = user_addr
+
+    # Priority 3: City name from user profile
     elif (
         current_user
-        and getattr(current_user, "city", None) is not None
-        and str(current_user.city).strip() != ""
+        and getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None))) is not None
+        and str(getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", "")))).strip() != ""
     ):
-        patient_lat, patient_lng = get_patient_coords(
-            current_user.city, getattr(current_user, "address", None)
-        )
+        user_city = getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None)))
+        user_addr = getattr(current_user, "home_address", getattr(current_user, "practice_address", getattr(current_user, "address", None)))
+        patient_lat, patient_lng = resolve_coords_sync(user_city, user_addr)
         if not extracted_city:
-            extracted_city = current_user.city
-            city = current_user.city
-        if not extracted_area and getattr(current_user, "address", None):
-            extracted_area = current_user.address
-            area = current_user.address
+            extracted_city = user_city
+            city = user_city
+        if not extracted_area and user_addr:
+            extracted_area = user_addr
+            area = user_addr
+
+    # Priority 4: NLP extracted city / area
     else:
-        patient_lat, patient_lng = get_patient_coords(
-            extracted_city,
-            extracted_area
-        )
+        patient_lat, patient_lng = resolve_coords_sync(extracted_city, extracted_area)
 
     display_location = extracted_area or extracted_city
 
