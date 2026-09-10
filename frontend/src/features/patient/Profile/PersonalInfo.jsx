@@ -228,8 +228,6 @@ export default function PersonalInfo() {
             <InfoField label="Gender"         value={user.gender || 'Not provided'} />
             <InfoField label="Home City"      value={user.city   || 'Not provided'} />
             <InfoField label="Home Address"   value={user.address || 'Not provided'} />
-            <InfoField label="Role"           value={role} />
-            <InfoField label="Account Status" value="Verified & Active" />
           </div>
 
           {saveSuccess && (

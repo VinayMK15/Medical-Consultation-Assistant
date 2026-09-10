@@ -44,7 +44,7 @@ export default function DoctorSignup() {
       // role is always 'doctor' -- hardcoded and not exposed to the user
       const signupData = { ...formData };
       delete signupData.confirm_password;
-      await signup({ ...signupData, role: 'doctor' });
+      await signup({ ...signupData, role: 'doctor' }, '/api/auth/doctor/signup');
       setSubmitted(true);
     } catch (err) {
       if (err.response?.data?.detail) {

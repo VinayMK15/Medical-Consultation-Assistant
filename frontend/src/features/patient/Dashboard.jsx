@@ -13,6 +13,7 @@ import {
   CITY_AREA_COORDS,
   CITY_COORDS,
 } from '../../shared/constants/cities';
+import VoiceInputModal from './components/VoiceInputModal';
 
 // Smoothly re-centers the map when coords change
 delete L.Icon.Default.prototype._getIconUrl;
@@ -290,14 +291,59 @@ function MatchedDoctorsPanel({
 }
 
 function ChatMessage({ msg, user }) {
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  const handleSpeak = (text) => {
+    if (!window.speechSynthesis) return;
+    if (isPlaying) {
+      window.speechSynthesis.cancel();
+      setIsPlaying(false);
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.onend = () => setIsPlaying(false);
+    utterance.onerror = () => setIsPlaying(false);
+    setIsPlaying(true);
+    window.speechSynthesis.speak(utterance);
+  };
+
   if (msg.sender === 'bot') {
     return (
-      <div className="flex gap-3">
+      <div className="flex gap-3 items-start group">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-50 text-xs font-bold text-blue-700 ring-1 ring-blue-100">
           AI
         </div>
         <div className="max-w-[86%] rounded-2xl rounded-tl-md border border-slate-200 bg-white px-4 py-3 text-sm leading-6 text-slate-700 shadow-sm">
           {msg.text}
+          <div className="mt-2 flex items-center justify-end">
+            <button
+              type="button"
+              onClick={() => handleSpeak(msg.text)}
+              title={isPlaying ? 'Stop listening' : 'Listen to message'}
+              className={`flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium transition ${
+                isPlaying
+                  ? 'bg-blue-100 text-blue-700'
+                  : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'
+              }`}
+            >
+              {isPlaying ? (
+                <>
+                  <svg className="h-3.5 w-3.5 text-blue-600 animate-pulse" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                  </svg>
+                  <span>Playing...</span>
+                </>
+              ) : (
+                <>
+                  <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.536 8.464a5 5 0 010 7.072M18.364 5.636a9 9 0 010 12.728M11 5L6 9H2v6h4l5 4V5z" />
+                  </svg>
+                  <span>Listen 🔊</span>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -774,6 +820,7 @@ export default function Dashboard() {
 
   const [selectedDoctor, setSelectedDoctor] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [bookedDoctorId, setBookedDoctorId] = useState(null);
 
   const [activeRoute, setActiveRoute]   = useState(null);   // GeoJSON LineString geometry
@@ -1003,8 +1050,8 @@ export default function Dashboard() {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isRouting]);
 
-  const handleSendMessage = async () => {
-    const userText = chatInput.trim();
+  const sendMessageWithText = async (customText) => {
+    const userText = (customText !== undefined ? customText : chatInput).trim();
     if (!userText || isRouting) return;
 
     setMessages((prev) => [...prev, { sender: 'user', text: userText }]);
@@ -1089,6 +1136,8 @@ export default function Dashboard() {
       setIsRouting(false);
     }
   };
+
+  const handleSendMessage = () => sendMessageWithText();
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -1238,12 +1287,12 @@ export default function Dashboard() {
               )}
             </div>
 
-            <div className="flex items-end gap-3">
-              <div className="flex-1 rounded-xl border border-slate-200 bg-slate-50 p-3 transition focus-within:border-blue-500 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
+            <div className="flex items-end gap-2.5">
+              <div className="flex-1 flex items-end rounded-xl border border-slate-200 bg-slate-50 p-2.5 transition focus-within:border-blue-500 focus-within:bg-white focus-within:ring-4 focus-within:ring-blue-100">
                 <textarea
                   rows="2"
                   className="w-full resize-none bg-transparent text-sm leading-6 text-slate-900 outline-none"
-                  placeholder="Example: chest pain near Indiranagar Bangalore"
+                  placeholder="Describe your symptoms (e.g. chest pain near Indiranagar)..."
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => {
@@ -1253,12 +1302,25 @@ export default function Dashboard() {
                     }
                   }}
                 />
+                
+                {/* Voice Input Trigger Button */}
+                <button
+                  type="button"
+                  onClick={() => setIsVoiceModalOpen(true)}
+                  title="Speak symptoms in Hindi, Tamil, Telugu, etc."
+                  className="ml-2 mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 transition hover:bg-blue-100 hover:text-blue-700 active:scale-95 shadow-sm"
+                >
+                  <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                  </svg>
+                </button>
               </div>
 
               <button
+                type="button"
                 onClick={handleSendMessage}
                 disabled={isRouting || !chatInput.trim()}
-                className="rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+                className="flex h-[46px] items-center justify-center rounded-xl bg-blue-600 px-5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isRouting ? 'Routing...' : 'Send'}
               </button>
@@ -1435,6 +1497,15 @@ export default function Dashboard() {
         onClose={() => setIsModalOpen(false)} 
         doctor={selectedDoctor} 
         onConfirm={handleConfirmBooking} 
+      />
+
+      {/* Voice Input Modal for Regional Languages */}
+      <VoiceInputModal
+        isOpen={isVoiceModalOpen}
+        onClose={() => setIsVoiceModalOpen(false)}
+        onApplyText={(spokenText) => {
+          sendMessageWithText(spokenText);
+        }}
       />
     </div>
   );

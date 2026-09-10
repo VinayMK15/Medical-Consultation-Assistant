@@ -23,7 +23,7 @@ export default function AdminLogin() {
     setLoading(true);
 
     try {
-      const data = await login(email, password);
+      const data = await login(email, password, '/api/auth/admin/login');
 
       if (data?.user?.role !== 'admin') {
         logout();

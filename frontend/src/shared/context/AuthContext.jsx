@@ -89,12 +89,12 @@ export const AuthProvider = ({ children }) => {
 
   // ── Auth actions ─────────────────────────────────────────────────────────
 
-  const login = async (email, password) => {
+  const login = async (email, password, endpoint = '/api/auth/patient/login') => {
     const formData = new URLSearchParams();
     formData.append('username', email);
     formData.append('password', password);
 
-    const response = await api.post('/api/auth/login', formData, {
+    const response = await api.post(endpoint, formData, {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     });
 
@@ -106,8 +106,8 @@ export const AuthProvider = ({ children }) => {
     return response.data;
   };
 
-  const signup = async (userData) => {
-    const response = await api.post('/api/auth/signup', userData);
+  const signup = async (userData, endpoint = '/api/auth/patient/signup') => {
+    const response = await api.post(endpoint, userData);
     return response.data;
   };
 
