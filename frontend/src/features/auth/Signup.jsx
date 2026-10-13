@@ -1,325 +1,427 @@
-import React, { useState, useContext } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useState, useContext, useRef } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Helmet } from 'react-helmet-async';
 import { AuthContext } from '../../shared/context/AuthContext';
+import AuthShell from '../../shared/components/AuthShell';
+import Button from '../../shared/components/ui/Button';
+import { Input, Select, Textarea, PasswordInput } from '../../shared/components/ui/Input';
+import { CityAutocomplete, AddressAutocomplete } from '../../shared/components/LocationFields';
 
-const routingBenefits = [
-  'Symptom-based doctor routing',
-  'Location-aware specialist matches',
-  'Saved access to your routing dashboard',
-];
+// Strength meter + optional-field wrapper are shared with provider signup.
+import PasswordStrengthMeter, { OptionalField } from '../../shared/components/PasswordStrengthMeter';
+import useDocumentTitle from '../../hooks/useDocumentTitle';
 
+
+function SignupHero() {
+  return (
+    <div className="max-w-md xl:max-w-lg space-y-6 pr-4">
+      <div>
+        <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl xl:text-5xl xl:leading-[1.15]">
+          Find the right care, <span className="text-primary-600">right nearby.</span>
+        </h1>
+        <p className="mt-3 text-sm sm:text-base leading-relaxed text-slate-600">
+          MedAssist matches your symptoms with top-rated medical specialists in your city in seconds.
+        </p>
+      </div>
+
+      <div className="space-y-4 pt-2">
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary-100 text-base font-bold text-primary-700">
+            🩺
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Intelligent Specialist Routing</h3>
+            <p className="text-sm text-slate-600">Guided symptom assessment directed to the right department.</p>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-base font-bold text-emerald-700">
+            📍
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Verified Nearby Clinics</h3>
+            <p className="text-sm text-slate-600">Real-time matching based on your location and neighborhood.</p>
+          </div>
+        </div>
+
+        <div className="flex items-start gap-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-base font-bold text-violet-700">
+            🔒
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Confidential & Patient-First</h3>
+            <p className="text-sm text-slate-600">Your health queries and details are strictly private.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Success screen ─────────────────────────────────────────────────────────
+function SuccessScreen({ fullName }) {
+  const navigate = useNavigate();
+  return (
+    <AuthShell altTo="/doctor/signup" altLabel="Doctor signup" image overlay="soft">
+      <div className="w-full max-w-md text-center">
+        <div className="rounded-2xl border border-white/70 bg-white/95 p-8 shadow-xl backdrop-blur sm:p-10">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl bg-success-50 text-3xl font-bold text-success-600">
+            ✓
+          </div>
+          <h2 className="text-2xl font-bold text-slate-950">Account created!</h2>
+          <p className="mt-2 text-sm leading-relaxed text-slate-500">
+            Welcome, <span className="font-semibold text-primary-600">{fullName}</span>. Your account
+            is ready. Sign in to start finding doctors near you.
+          </p>
+
+          <div className="mt-6 rounded-xl border border-primary-100 bg-primary-50 p-4 text-left">
+            <p className="text-sm font-semibold text-primary-800">What's next?</p>
+            <ul className="mt-1 list-inside list-disc space-y-1 text-xs text-primary-700">
+              <li>Sign in with your email and password</li>
+              <li>Describe your symptoms to the routing assistant</li>
+              <li>Get matched with nearby relevant specialists</li>
+            </ul>
+          </div>
+
+          <Button
+            type="button"
+            variant="primary"
+            size="lg"
+            className="mt-6 w-full"
+            onClick={() => navigate('/login')}
+          >
+            Go to Sign in
+          </Button>
+        </div>
+      </div>
+    </AuthShell>
+  );
+}
+
+// ── Main component ─────────────────────────────────────────────────────────
 export default function Signup() {
-  const [formData, setFormData] = useState({
+  useDocumentTitle('Sign Up');
+  const [values, setValues] = useState({
     full_name: '',
     email: '',
-    password: '',
-    confirm_password: '',
+    phone: '',
     age: '',
-    gender: 'Male',
+    gender: '',
+    password: '',
+    confirm: '',
+    home_city: '',
+    home_address: '',
   });
-  const [error, setError] = useState('');
+
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState('');
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
 
   const { signup } = useContext(AuthContext);
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+  // Focus management: a failed submit must not leave focus parked on the
+  // Create account button.
+  const fullNameRef = useRef(null);
+  const emailRef = useRef(null);
+  const passwordRef = useRef(null);
+  const confirmRef = useRef(null);
+  const phoneRef = useRef(null);
+
+  // DOM order, so focus lands on the first thing the user must actually fix.
+  // Mirrors the visual order: name, email, password, confirm, then phone.
+  const FIELD_ORDER = ['full_name', 'email', 'password', 'confirm', 'phone'];
+  const FIELD_REFS = {
+    full_name: fullNameRef,
+    email: emailRef,
+    password: passwordRef,
+    confirm: confirmRef,
+    phone: phoneRef,
   };
 
+  // Generic field setter — compatible with native onChange.
+  // CityAutocomplete/AddressAutocomplete own their own query state and call
+  // `onChange(value)` with a plain string rather than a DOM event, so this has
+  // to accept both shapes. Reading `e.target.value` unconditionally crashed the
+  // whole page on the first keystroke in either field.
+  const setField = (name) => (arg) => {
+    const nextValue = typeof arg === 'string' ? arg : arg?.target?.value ?? '';
+    setValues((v) => ({ ...v, [name]: nextValue }));
+    if (errors[name]) setErrors((prev) => ({ ...prev, [name]: undefined }));
+  };
+
+  // ── Validation ──────────────────────────────────────────────────────────
+  const validate = () => {
+    const next = {};
+
+    if (!values.full_name.trim()) next.full_name = 'Full name is required.';
+
+    if (!values.email.trim()) {
+      next.email = 'Email address is required.';
+    } else if (!/\S+@\S+\.\S+/.test(values.email)) {
+      next.email = 'Please enter a valid email address.';
+    }
+
+    if (!values.phone.trim()) {
+      next.phone = 'Phone number is required.';
+    } else if (!/^[+\d][\d\s-]{6,15}$/.test(values.phone.trim())) {
+      next.phone = 'Please enter a valid phone number.';
+    }
+
+    if (!values.password) {
+      next.password = 'Password is required.';
+    } else if (values.password.length < 8) {
+      next.password = 'Password must be at least 8 characters.';
+    }
+
+    if (values.password !== values.confirm) {
+      next.confirm = 'Passwords do not match.';
+    }
+
+    if (values.age) {
+      const ageNum = Number(values.age);
+      if (isNaN(ageNum) || ageNum < 0 || ageNum > 120)
+        next.age = 'Age must be between 0 and 120.';
+    }
+
+    setErrors(next);
+    return next;
+  };
+
+  // ── Submit ──────────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError('');
+    setFormError('');
 
-    const age = Number(formData.age);
-    if (formData.age && (age < 0 || age > 120)) {
-      setError('Please enter a valid age.');
+    const next = validate();
+    const firstBad = FIELD_ORDER.find((f) => next[f]);
+    if (firstBad) {
+      FIELD_REFS[firstBad].current?.focus();
       return;
     }
-
-    if (formData.password !== formData.confirm_password) {
-      setError('Passwords do not match.');
-      return;
-    }
-
     setLoading(true);
     try {
-      const signupData = { ...formData };
-      delete signupData.confirm_password;
-      await signup({ ...signupData, role: 'patient' });
+      // PatientCreate (backend/schemas.py) accepts only these fields:
+      // email, password, full_name + optional age, gender, phone,
+      // home_city, home_address. role is assigned server-side.
+      const payload = {
+        email: values.email.trim(),
+        password: values.password,
+        full_name: values.full_name.trim(),
+        age: values.age ? Number(values.age) : null,
+        gender: values.gender || null,
+        phone: values.phone.trim() || null,
+        home_city: values.home_city || null,
+        home_address: values.home_address || null,
+      };
+      await signup(payload); // defaults to /api/auth/patient/signup
       setSubmitted(true);
     } catch (err) {
-      if (err.response && err.response.data) {
-        if (err.response.data.detail) {
-          const detail = err.response.data.detail;
-          setError(Array.isArray(detail) ? detail[0].msg : detail);
-        } else if (err.response.data.error) {
-          setError(err.response.data.error);
-        } else {
-          setError('Signup failed. Please try again.');
-        }
+      if (err.response?.data?.detail) {
+        const detail = err.response.data.detail;
+        setFormError(Array.isArray(detail) ? detail[0].msg : detail);
       } else {
-        setError('Network Error: Cannot connect to the server. Is the backend running?');
+        setFormError('Registration failed. Please try again.');
       }
     } finally {
       setLoading(false);
     }
   };
 
-  // ── Success screen ────────────────────────────────────────────────────────
-  if (submitted) {
-    return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-5 text-slate-900">
-        <div className="w-full max-w-md text-center">
-          <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/60 sm:p-10">
-            <div className="w-16 h-16 bg-green-100 text-green-700 rounded-2xl flex items-center justify-center text-3xl mx-auto mb-5">
-              ✓
-            </div>
-            <h2 className="text-2xl font-bold text-slate-950 mb-2">Account created!</h2>
-            <p className="text-slate-500 text-sm leading-relaxed mb-6">
-              Welcome, <span className="font-semibold text-blue-600">{formData.full_name}</span>. Your account is
-              ready. Sign in to start finding doctors near you.
-            </p>
-
-            <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-left mb-6">
-              <p className="text-teal-800 text-sm font-semibold mb-1">What's next?</p>
-              <ul className="text-teal-700 text-xs space-y-1 list-disc list-inside">
-                <li>Sign in with your email and password</li>
-                <li>Describe your symptoms to the routing assistant</li>
-                <li>Get matched with nearby relevant specialists</li>
-              </ul>
-            </div>
-
-            <Link
-              to="/login"
-              className="inline-block w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100"
-            >
-              Go to Login
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  if (submitted) return <SuccessScreen fullName={values.full_name} />;
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <main className="min-h-screen grid lg:grid-cols-[0.95fr_1.05fr]">
-        <section className="hidden lg:flex flex-col justify-between border-r border-slate-200 bg-white px-12 py-10">
-          <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-blue-500/20">
-              M
-            </div>
-            <div>
-              <p className="text-lg font-bold tracking-tight">MedAssist</p>
-              <p className="text-xs font-medium uppercase tracking-[0.22em] text-teal-600">Patient routing gateway</p>
-            </div>
+    <>
+      <Helmet>
+        <meta name="description" content="Join MedAssist to describe symptoms, find the right specialist, and book appointments nearby." />
+      </Helmet>
+      <AuthShell altTo="/doctor/signup" altLabel="Doctor signup" image overlay="soft" hero={<SignupHero />}>
+        <div className="w-full max-w-3xl xl:max-w-4xl shrink-0 overflow-hidden rounded-2xl border border-white/80 bg-white/95 shadow-xl backdrop-blur">
+
+        {/* Card header */}
+        <div className="border-b border-slate-100/80 px-5 pt-4 pb-3 sm:px-6">
+          <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Create your account</h1>
+          <p className="text-xs sm:text-sm text-slate-500">
+            Tell us a little about you so we can find doctors near you.
+          </p>
+        </div>
+
+        {/* Server-error banner */}
+        {formError && (
+          <div
+            role="alert"
+            className="mx-5 mt-3 rounded-lg bg-danger-50 px-3 py-2 text-xs sm:text-sm text-danger-700 sm:mx-6"
+          >
+            {formError}
           </div>
+        )}
 
-          <div className="max-w-xl">
-            <div className="inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-              <span className="h-1.5 w-1.5 rounded-full bg-teal-500"></span>
-              Patient account setup
-            </div>
-            <h1 className="mt-6 text-5xl font-bold leading-tight tracking-tight text-slate-950">
-              Create your routing profile.
-            </h1>
-            <p className="mt-5 max-w-lg text-base leading-7 text-slate-600">
-              Your profile helps MedAssist organize doctor discovery around your symptoms, city, and basic patient details.
-            </p>
+        <form noValidate onSubmit={handleSubmit} aria-busy={loading}>
+          <div className="grid gap-4 p-4 sm:p-5 md:grid-cols-2">
 
-            <div className="mt-8 grid gap-3">
-              {routingBenefits.map((item) => (
-                <div key={item} className="flex items-center gap-3 text-sm font-medium text-slate-700">
-                  <span className="h-2.5 w-2.5 rounded-full bg-teal-500 ring-4 ring-teal-50"></span>
-                  {item}
-                </div>
-              ))}
-            </div>
-          </div>
+            {/* ── LEFT: Account & Security details ─────────────────────────── */}
+            <div className="space-y-3">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Personal details
+              </h2>
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-            <p className="text-sm font-semibold text-slate-800">Provider registration?</p>
-            <p className="mt-1 text-sm text-slate-500">
-              Healthcare professionals use a separate verification workflow.
-            </p>
-            <Link
-              to="/doctor/signup"
-              className="mt-4 inline-flex rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-2.5 text-sm font-bold text-indigo-700 transition hover:bg-indigo-100"
-            >
-              Register as provider
-            </Link>
-          </div>
-        </section>
+              <Input
+                ref={fullNameRef}
+                label="Full name"
+                name="full_name"
+                autoComplete="name"
+                placeholder="e.g. Rahul Sharma"
+                value={values.full_name}
+                onChange={setField('full_name')}
+                error={errors.full_name}
+              />
 
-        <section className="flex min-h-screen items-center justify-center px-5 py-10 sm:px-8">
-          <div className="w-full max-w-lg">
-            <div className="mb-8 lg:hidden">
-              <div className="flex items-center gap-3">
-                <div className="h-11 w-11 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-blue-500/20">
-                  M
-                </div>
-                <div>
-                  <p className="text-lg font-bold tracking-tight">MedAssist</p>
-                  <p className="text-xs font-medium uppercase tracking-[0.18em] text-teal-600">Patient routing gateway</p>
-                </div>
-              </div>
-              <h1 className="mt-7 text-3xl font-bold leading-tight tracking-tight text-slate-950">
-                Create your account.
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-slate-600">
-                Set up a patient profile for symptom-based routing and doctor discovery.
-              </p>
-            </div>
+              <Input
+                ref={emailRef}
+                label="Email address"
+                name="email"
+                type="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={values.email}
+                onChange={setField('email')}
+                error={errors.email}
+              />
 
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/60 sm:p-8">
-              <div className="mb-7">
-                <p className="text-sm font-semibold text-blue-600">Patient signup</p>
-                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950">Join MedAssist</h2>
-                <p className="mt-2 text-sm text-slate-500">Create an account to save routing results and doctor matches.</p>
-              </div>
+              <OptionalField label="Age and gender">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Select
+                    label="Gender"
+                    name="gender"
+                    value={values.gender}
+                    onChange={setField('gender')}
+                  >
+                    <option value="">Prefer not to say</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Other">Other</option>
+                  </Select>
 
-              {error && (
-                <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
-                  {error}
-                </div>
-              )}
-
-              <form onSubmit={handleSubmit} className="space-y-5">
-                <div>
-                  <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="full_name">
-                    Full name
-                  </label>
-                  <input
-                    id="full_name"
-                    name="full_name"
-                    type="text"
-                    required
-                    value={formData.full_name}
-                    onChange={handleChange}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                    placeholder="John Doe"
+                  <Input
+                    label="Age"
+                    name="age"
+                    type="number"
+                    autoComplete="off"
+                    min="0"
+                    max="120"
+                    placeholder="e.g. 28"
+                    value={values.age}
+                    onChange={setField('age')}
+                    error={errors.age}
                   />
                 </div>
+              </OptionalField>
 
-                <div>
-                  <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="email">
-                    Email address
-                  </label>
-                  <input
-                    id="email"
-                    name="email"
-                    type="email"
-                    required
-                    value={formData.email}
-                    onChange={handleChange}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                    placeholder="you@example.com"
-                  />
-                </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <PasswordInput
+                  ref={passwordRef}
+                  label="Password"
+                  name="password"
+                  autoComplete="new-password"
+                  placeholder="••••••••"
+                  value={values.password}
+                  onChange={setField('password')}
+                  error={errors.password}
+                />
+                <PasswordInput
+                  ref={confirmRef}
+                  label="Confirm password"
+                  name="confirm"
+                  autoComplete="new-password"
+                  placeholder="••••••••"
+                  value={values.confirm}
+                  onChange={setField('confirm')}
+                  error={errors.confirm}
+                />
+              </div>
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="password">
-                      Password
-                    </label>
-                    <input
-                      id="password"
-                      name="password"
-                      type="password"
-                      required
-                      value={formData.password}
-                      onChange={handleChange}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                      placeholder="********"
-                    />
-                  </div>
+              <PasswordStrengthMeter password={values.password} />
+            </div>
 
-                  <div>
-                    <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="confirm_password">
-                      Confirm password
-                    </label>
-                    <input
-                      id="confirm_password"
-                      name="confirm_password"
-                      type="password"
-                      required
-                      value={formData.confirm_password}
-                      onChange={handleChange}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                      placeholder="********"
-                    />
-                  </div>
-                </div>
+            {/* ── RIGHT: Location & Contact details ─────────────────────────── */}
+            <div className="space-y-3 rounded-xl border border-slate-100 bg-slate-50/70 p-3.5 sm:p-4">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                Location & Contact
+              </h2>
 
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="age">
-                      Age
-                    </label>
-                    <input
-                      id="age"
-                      name="age"
-                      type="number"
-                      required
-                      min="0"
-                      max="120"
-                      value={formData.age}
-                      onChange={handleChange}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                      placeholder="25"
-                    />
-                  </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Input
+                  ref={phoneRef}
+                  label="Phone"
+                  name="phone"
+                  type="tel"
+                  autoComplete="tel"
+                  placeholder="e.g. 9876543210"
+                  value={values.phone}
+                  onChange={setField('phone')}
+                  error={errors.phone}
+                />
 
-                  <div>
-                    <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="gender">
-                      Gender
-                    </label>
-                    <select
-                      id="gender"
-                      name="gender"
-                      required
-                      value={formData.gender}
-                      onChange={handleChange}
-                      className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                    >
-                      <option value="Male">Male</option>
-                      <option value="Female">Female</option>
-                      <option value="Other">Other</option>
-                    </select>
-                  </div>
-                </div>
+                <CityAutocomplete
+                  label="City"
+                  value={values.home_city}
+                  onChange={setField('home_city')}
+                  error={errors.home_city}
+                />
+              </div>
 
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {loading ? 'Creating account...' : 'Create patient account'}
-                </button>
-              </form>
+              <AddressAutocomplete
+                label="Address"
+                value={values.home_address}
+                onChange={setField('home_address')}
+                error={errors.home_address}
+                hint="Include the area name so we can match doctors nearby."
+              />
 
-              <div className="mt-7 border-t border-slate-100 pt-6 text-center text-sm text-slate-500">
+              <div className="rounded-lg border border-primary-100 bg-primary-50/90 px-3 py-2 text-xs text-primary-800">
+                <p className="font-semibold flex items-center gap-1.5">
+                  📍 Proximity Matching
+                </p>
+                <p className="mt-0.5 text-primary-700">Doctors will be prioritized near your address.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* ── BOTTOM ACTION BAR: Centered button and login link below ─── */}
+          <div className="border-t border-slate-100 bg-slate-50/60 px-5 py-3.5 text-center">
+            <div className="flex flex-col items-center justify-center">
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                loading={loading}
+                className="w-full shadow-xs sm:w-auto sm:min-w-[220px]"
+              >
+                Create account
+              </Button>
+              <p className="mt-2 text-xs text-slate-600 sm:text-sm">
                 Already have an account?{' '}
-                <Link to="/login" className="font-bold text-blue-600 transition hover:text-blue-700">
+                <Link to="/login" className="font-semibold text-primary-600 hover:text-primary-700 hover:underline">
                   Sign in
                 </Link>
-              </div>
-            </div>
-
-            <div className="mt-5 rounded-2xl border border-indigo-100 bg-indigo-50 px-5 py-4 text-center lg:hidden">
-              <p className="text-sm font-semibold text-indigo-800">Registering as a provider?</p>
-              <Link to="/doctor/signup" className="mt-2 inline-block text-sm font-bold text-indigo-700">
-                Open provider registration
-              </Link>
+              </p>
+              <p className="mt-3 text-xs text-slate-500">
+                By creating an account you agree to our{' '}
+                <Link to="/terms" className="font-medium text-slate-600 underline hover:text-slate-800">
+                  Terms of Service
+                </Link>{' '}
+                and{' '}
+                <Link to="/privacy" className="font-medium text-slate-600 underline hover:text-slate-800">
+                  Privacy Policy
+                </Link>
+                .
+              </p>
             </div>
           </div>
-        </section>
-      </main>
-    </div>
+        </form>
+      </div>
+      </AuthShell>
+    </>
   );
 }

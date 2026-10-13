@@ -1,6 +1,7 @@
 import React, { useContext, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { AuthContext } from '../../shared/context/AuthContext';
+import useDocumentTitle from '../../hooks/useDocumentTitle';
 
 const adminHighlights = [
   'Restricted platform controls',
@@ -11,9 +12,14 @@ const adminHighlights = [
 export default function AdminLogin() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() =>
+    new URLSearchParams(window.location.search).get('err') === 'admin-portal'
+      ? 'Admin accounts must sign in through this portal.'
+      : ''
+  );
   const [loading, setLoading] = useState(false);
 
+  useDocumentTitle('Admin Login');
   const { login, logout } = useContext(AuthContext);
   const navigate = useNavigate();
 
@@ -25,7 +31,7 @@ export default function AdminLogin() {
     try {
       const data = await login(email, password, '/api/auth/admin/login');
 
-      if (data?.user?.role !== 'admin') {
+      if (!['admin', 'superadmin'].includes(data?.user?.role)) {
         logout();
         setError('This portal is restricted to platform administrators.');
         return;
@@ -46,7 +52,7 @@ export default function AdminLogin() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <main className="min-h-screen grid lg:grid-cols-[0.95fr_1.05fr]">
+      <main id="main-content" className="min-h-screen grid lg:grid-cols-[0.95fr_1.05fr]" tabIndex={-1}>
         <section className="hidden lg:flex flex-col justify-between border-r border-slate-200 bg-white px-12 py-10">
           <div className="flex items-center gap-3">
             <div className="h-11 w-11 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-sm shadow-sm">

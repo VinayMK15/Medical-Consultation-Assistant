@@ -1,30 +1,70 @@
 import React, { useState, useContext } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { AuthContext } from '../../shared/context/AuthContext';
 import ForgotPasswordModal from './components/ForgotPasswordModal';
+import AuthShell from '../../shared/components/AuthShell';
+import Button from '../../shared/components/ui/Button';
+import { Input, PasswordInput } from '../../shared/components/ui/Input';
+import { LockIcon } from '../../shared/components/ui/icons';
+import useDocumentTitle from '../../hooks/useDocumentTitle';
 
-const providerHighlights = [
-  'Review routed patient requests',
-  'Access provider dashboard tools',
-  'Admin-verified provider access',
+const highlights = [
+  'AI-assisted patient triage',
+  'Manage schedule & availability',
 ];
+
+function DoctorLoginHero() {
+  return (
+    <div>
+      <h1 className="text-4xl font-bold leading-tight text-slate-900 xl:text-5xl">
+        Manage your patients, all in one place.
+      </h1>
+      <p className="mt-4 text-base text-slate-700">
+        Sign in to the provider portal to review routed patient requests,
+        manage your schedule, and keep your practice running smoothly.
+      </p>
+      <ul className="mt-6 space-y-2.5">
+        {highlights.map((h) => (
+          <li key={h} className="flex items-center gap-2.5 text-sm font-medium text-slate-800">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary-500" />
+            {h}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 export default function DoctorLogin() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(true);
+  const [errors, setErrors] = useState({});
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showForgotModal, setShowForgotModal] = useState(false);
 
+  useDocumentTitle('Doctor Login');
   const { login, logout } = useContext(AuthContext);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isExpired = searchParams.get('expired') === 'true';
+
+  const validate = () => {
+    const next = {};
+    if (!email.trim()) next.email = 'Email is required.';
+    if (!password) next.password = 'Password is required.';
+    setErrors(next);
+    return Object.keys(next).length === 0;
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    if (!validate()) return;
     setLoading(true);
     try {
-      const data = await login(email, password, '/api/auth/doctor/login');
+      const data = await login(email, password, '/api/auth/doctor/login', rememberMe);
       const role = data?.user?.role;
 
       if (role === 'doctor') {
@@ -33,8 +73,11 @@ export default function DoctorLogin() {
         logout();
         setError('This account uses the restricted admin portal.');
       } else {
-        // Patient trying to use the provider portal
-        setError('This portal is for healthcare providers only. Please use the patient login.');
+        // A non-doctor account reached this portal. The page deliberately has
+        // no link to the patient login, so the message must stand alone —
+        // it used to point at a "patient login" page the header no longer
+        // offered.
+        setError('This portal is for verified healthcare providers only.');
       }
     } catch (err) {
       if (err.response?.data?.detail) {
@@ -48,164 +91,131 @@ export default function DoctorLogin() {
     }
   };
 
+  // The backend distinguishes three account states. Only a genuine
+  // credential failure is an error; "pending verification" and "deactivated"
+  // are account states and read wrong in the same red box as a bad password.
+  // The old copy also printed "Account under review — Your account is
+  // pending admin verification.", saying the same thing twice.
+  const isPendingReview = /pending admin verification/i.test(error);
+  const isDeactivated = /deactivated/i.test(error);
+  const isNotice = isPendingReview || isDeactivated;
+
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <main className="min-h-screen grid lg:grid-cols-[0.95fr_1.05fr]">
-        <section className="hidden lg:flex flex-col justify-between border-r border-slate-200 bg-white px-12 py-10">
-          <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-indigo-500/20">
-              M
-            </div>
-            <div>
-              <p className="text-lg font-bold tracking-tight">MedAssist</p>
-              <p className="text-xs font-medium uppercase tracking-[0.22em] text-indigo-600">Provider routing portal</p>
-            </div>
+    <AuthShell
+      image
+      hero={<DoctorLoginHero />}
+    >
+      <div className="w-full max-w-md shrink-0 rounded-2xl border border-white/70 bg-white/95 p-8 shadow-xl backdrop-blur">
+        <h2 className="text-2xl font-bold text-slate-900">Welcome back</h2>
+        <p className="mt-1 text-sm text-slate-600">Sign in to your provider portal.</p>
+
+        {/* role/status so each of these three banners is announced. */}
+        {isExpired && (
+          <div role="status" className="mt-4 rounded-lg bg-warning-50 px-3 py-2 text-sm text-warning-700">
+            Your session expired. Please sign in again.
           </div>
+        )}
 
-          <div className="max-w-xl">
-            <div className="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-700">
-              <span className="h-1.5 w-1.5 rounded-full bg-indigo-500"></span>
-              Verified provider access
-            </div>
-            <h1 className="mt-6 text-5xl font-bold leading-tight tracking-tight text-slate-950">
-              Sign in to the provider workspace.
-            </h1>
-            <p className="mt-5 max-w-lg text-base leading-7 text-slate-600">
-              Access routed patient requests, view queue details, and manage provider-side workflow after verification.
+        {error && isNotice && (
+          <div role="status" className="mt-4 rounded-lg border border-warning-200 bg-warning-50 px-3 py-2.5">
+            <p className="flex items-start gap-2 text-sm font-semibold text-warning-700">
+              <svg aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+              </svg>
+              {isPendingReview ? 'Account under review' : 'Account deactivated'}
             </p>
-
-            <div className="mt-8 grid gap-3">
-              {providerHighlights.map((item) => (
-                <div key={item} className="flex items-center gap-3 text-sm font-medium text-slate-700">
-                  <span className="h-2.5 w-2.5 rounded-full bg-indigo-500 ring-4 ring-indigo-50"></span>
-                  {item}
-                </div>
-              ))}
-            </div>
+            <p className="mt-1 pl-6 text-sm leading-5 text-warning-700">
+              {isPendingReview
+                ? 'Your provider account has been created but an admin has not verified it yet. You will be able to sign in once it is approved.'
+                : 'This provider account has been disabled. Contact MedAssist support if you think this is a mistake.'}
+            </p>
           </div>
+        )}
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-            <p className="text-sm font-semibold text-slate-800">Need provider access?</p>
-            <p className="mt-1 text-sm text-slate-500">
-              Submit a provider profile for admin review before using this portal.
-            </p>
-            <Link
-              to="/doctor/signup"
-              className="mt-4 inline-flex rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-2.5 text-sm font-bold text-indigo-700 transition hover:bg-indigo-100"
-            >
-              Register as provider
+        {error && !isNotice && (
+          <div role="alert" className="mt-4 rounded-lg border border-danger-200 bg-danger-50 px-3 py-2 text-sm text-danger-700">
+            {error}
+          </div>
+        )}
+
+        <form noValidate onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <Input
+            label="Email address"
+            name="email"
+            type="email"
+            autoComplete="email"
+            placeholder="doctor@hospital.com"
+            value={email}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
+            }}
+            error={errors.email}
+          />
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <label htmlFor="doctor-password" className="text-sm font-medium text-slate-700">
+                Password
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowForgotModal(true)}
+                className="cursor-pointer text-sm font-medium text-primary-600 hover:text-primary-700"
+              >
+                Forgot password?
+              </button>
+            </div>
+            <PasswordInput
+              id="doctor-password"
+              name="password"
+              autoComplete="current-password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
+              }}
+              error={errors.password}
+            />
+          </div>
+          <label className="flex cursor-pointer select-none items-center gap-2 text-sm font-medium text-slate-700">
+            <input
+              type="checkbox"
+              checked={rememberMe}
+              onChange={(e) => setRememberMe(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300 accent-primary-600"
+            />
+            Remember me
+          </label>
+          <Button type="submit" variant="primary" size="lg" loading={loading} className="w-full">
+            Sign in
+          </Button>
+        </form>
+
+        <p className="mt-5 text-center text-sm text-slate-700">
+          New to MedAssist?{' '}
+          <Link to="/doctor/signup" className="font-semibold text-primary-600 hover:text-primary-700">
+            Register as a provider
+          </Link>
+        </p>
+
+        <div className="mt-6 space-y-1 border-t border-slate-100 pt-4 text-center text-sm text-slate-600">
+          <p className="flex items-center justify-center gap-1.5">
+            <LockIcon aria-hidden="true" className="h-3.5 w-3.5" />
+            Your information is encrypted and never shared without consent
+          </p>
+          <p>
+            For emergencies, contact local emergency services immediately.{' '}
+            <Link to="/privacy" className="font-medium text-primary-600 hover:underline">
+              Privacy Policy
             </Link>
-          </div>
-        </section>
+          </p>
+        </div>
+      </div>
 
-        <section className="flex min-h-screen items-center justify-center px-5 py-10 sm:px-8">
-          <div className="w-full max-w-md">
-            <div className="mb-8 lg:hidden">
-              <div className="flex items-center gap-3">
-                <div className="h-11 w-11 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-indigo-500/20">
-                  M
-                </div>
-                <div>
-                  <p className="text-lg font-bold tracking-tight">MedAssist</p>
-                  <p className="text-xs font-medium uppercase tracking-[0.18em] text-indigo-600">Provider routing portal</p>
-                </div>
-              </div>
-              <h1 className="mt-7 text-3xl font-bold leading-tight tracking-tight text-slate-950">
-                Provider sign in.
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-slate-600">
-                Access the dashboard for routed patient requests and provider workflow.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/60 sm:p-8">
-              <div className="mb-7">
-                <p className="text-sm font-semibold text-indigo-600">Provider portal</p>
-                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950">Welcome back</h2>
-                <p className="mt-2 text-sm text-slate-500">Sign in with your verified provider account.</p>
-              </div>
-
-              {error && (
-                error.includes('pending admin verification') ? (
-                  <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
-                    <span className="font-bold block mb-1">Account under review</span>
-                    {error}
-                  </div>
-                ) : (
-                  <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
-                    <span className="font-bold">Warning:</span> {error}
-                  </div>
-                )
-              )}
-
-              <form onSubmit={handleSubmit} className="space-y-5">
-                <div>
-                  <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="doctor-email">
-                    Provider email
-                  </label>
-                  <input
-                    id="doctor-email"
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                    placeholder="doctor@hospital.com"
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <label className="block text-sm font-semibold text-slate-700" htmlFor="doctor-password">
-                      Password
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowForgotModal(true)}
-                      className="text-xs font-semibold text-indigo-600 transition hover:text-indigo-700 bg-transparent border-none p-0 cursor-pointer"
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
-                  <input
-                    id="doctor-password"
-                    type="password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-100"
-                    placeholder="********"
-                  />
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-100 disabled:cursor-not-allowed disabled:opacity-70"
-                >
-                  {loading ? 'Signing in...' : 'Sign in to provider portal'}
-                </button>
-              </form>
-
-              <div className="mt-7 border-t border-slate-100 pt-6 text-center text-sm text-slate-500">
-                Not a provider?{' '}
-                <Link to="/login" className="font-bold text-indigo-600 transition hover:text-indigo-700">
-                  Patient login
-                </Link>
-              </div>
-            </div>
-
-            <div className="mt-5 rounded-2xl border border-indigo-100 bg-indigo-50 px-5 py-4 text-center lg:hidden">
-              <p className="text-sm font-semibold text-indigo-800">New provider?</p>
-              <Link to="/doctor/signup" className="mt-2 inline-block text-sm font-bold text-indigo-700">
-                Register your practice
-              </Link>
-            </div>
-          </div>
-        </section>
-      </main>
-
-      <ForgotPasswordModal isOpen={showForgotModal} onClose={() => setShowForgotModal(false)} />
-    </div>
+      {showForgotModal && (
+        <ForgotPasswordModal isOpen={showForgotModal} onClose={() => setShowForgotModal(false)} />
+      )}
+    </AuthShell>
   );
 }

@@ -1,238 +1,220 @@
-import React, { useState, useContext } from 'react';
-import { useNavigate, Link, useSearchParams } from 'react-router-dom';
+import React, { useState, useContext, useRef } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Helmet } from 'react-helmet-async';
 import { AuthContext } from '../../shared/context/AuthContext';
 import ForgotPasswordModal from './components/ForgotPasswordModal';
+import AuthShell from '../../shared/components/AuthShell';
+import Button from '../../shared/components/ui/Button';
+import { Input, PasswordInput } from '../../shared/components/ui/Input';
+import { LockIcon } from '../../shared/components/ui/icons';
+import useDocumentTitle from '../../hooks/useDocumentTitle';
 
-const trustPoints = [
+const highlights = [
   'Symptom-based routing',
   'Nearby specialist matching',
-  'Patient and provider portals',
 ];
+
+function LoginHero() {
+  return (
+    <div>
+      <h1 className="text-4xl font-bold leading-tight text-slate-900 xl:text-5xl">
+        Describe symptoms, find the right specialist nearby.
+      </h1>
+      <p className="mt-4 text-base text-slate-700">
+        MedAssist routes you to relevant doctors based on your symptoms and
+        location. It helps with direction, not diagnosis or medical consultation.
+      </p>
+      <ul className="mt-6 space-y-2.5">
+        {highlights.map((h) => (
+          <li key={h} className="flex items-center gap-2.5 text-sm font-medium text-slate-800">
+            <span className="h-1.5 w-1.5 rounded-full bg-primary-500" />
+            {h}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
+  const [rememberMe, setRememberMe] = useState(true);
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showForgotModal, setShowForgotModal] = useState(false);
 
+  const emailRef = useRef(null);
+  const passwordRef = useRef(null);
+
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  useDocumentTitle('Login');
   const { login, logout } = useContext(AuthContext);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const isExpired = searchParams.get('expired') === 'true';
+  const [expiredNotice, setExpiredNotice] = useState(isExpired);
+
+  const validate = () => {
+    const next = {};
+    if (!email.trim()) next.email = 'Email is required.';
+    else if (!EMAIL_RE.test(email.trim())) next.email = 'Enter a valid email address.';
+    if (!password) next.password = 'Password is required.';
+    setErrors(next);
+    return next;
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError('');
+    setFormError('');
+    setExpiredNotice(false);
+
+    const next = validate();
+    if (Object.keys(next).length > 0) {
+      if (next.email) emailRef.current?.focus();
+      else passwordRef.current?.focus();
+      return;
+    }
     setLoading(true);
     try {
-      const data = await login(email, password);
+      const data = await login(email, password, undefined, rememberMe);
       const role = data?.user?.role;
       if (role === 'doctor') {
         navigate('/doctor/dashboard');
       } else if (role === 'admin') {
         logout();
-        setError('This account uses the restricted admin portal.');
+        navigate('/admin/login?err=admin-portal');
       } else {
         navigate('/');
       }
     } catch (err) {
-      if (err.response && err.response.data) {
-        if (err.response.data.detail) {
-          const detail = err.response.data.detail;
-          if (Array.isArray(detail)) {
-            setError(detail[0].msg);
-          } else if (typeof detail === 'string') {
-            setError(detail);
-          } else {
-            setError(JSON.stringify(detail));
-          }
-        } else if (err.response.data.error) {
-          setError(err.response.data.error);
-        } else {
-          setError('Failed to login. Please check your credentials.');
-        }
-      } else {
-        setError('Failed to login. Please check your credentials.');
-      }
+      const detail = err.response?.data?.detail;
+      setFormError(
+        detail
+          ? Array.isArray(detail) ? detail[0].msg : detail
+          : 'Failed to sign in. Please check your credentials.'
+      );
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <main className="min-h-screen grid lg:grid-cols-[1.05fr_0.95fr]">
-        <section className="hidden lg:flex flex-col justify-between border-r border-slate-200 bg-white px-12 py-10">
-          <div className="flex items-center gap-3">
-            <div className="h-11 w-11 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-blue-500/20">
-              M
+    <>
+      <Helmet>
+        <meta name="description" content="Access your MedAssist patient account to manage appointments and find specialists near you." />
+      </Helmet>
+      <AuthShell lock altTo="/doctor/login" altLabel="Doctor login" image hero={<LoginHero />}>
+        <div className="flex max-h-full min-h-0 w-full max-w-md shrink-0 flex-col overflow-hidden rounded-2xl border border-white/70 bg-white/95 shadow-xl backdrop-blur">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6">
+        <h2 className="text-2xl font-bold text-slate-900">Welcome back</h2>
+          <p className="mt-1 text-sm text-slate-600">Sign in to find the right specialist near you.</p>
+
+          {/* Both banners need a role so the message is announced. The session-expired
+              notice renders on load rather than in response to a user action, so
+              it is a polite status; the submit failure is an alert. */}
+          {expiredNotice && (
+            <div role="status" className="mt-4 rounded-lg bg-warning-50 px-3 py-2 text-sm text-warning-700">
+              Your session expired. Please sign in again.
             </div>
+          )}
+          {formError && (
+            <div role="alert" className="mt-4 rounded-lg bg-danger-50 px-3 py-2 text-sm text-danger-700">
+              {formError}
+            </div>
+          )}
+
+          <form noValidate onSubmit={handleSubmit} aria-busy={loading} className="mt-5 space-y-3">
+            <Input
+              ref={emailRef}
+              label="Email address"
+              name="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (errors.email) setErrors((prev) => ({ ...prev, email: undefined }));
+              }}
+              error={errors.email}
+            />
             <div>
-              <p className="text-lg font-bold tracking-tight">MedAssist</p>
-              <p className="text-xs font-medium uppercase tracking-[0.22em] text-teal-600">Patient routing gateway</p>
-            </div>
-          </div>
-
-          <div className="max-w-xl">
-            <div className="inline-flex items-center gap-2 rounded-full border border-blue-100 bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
-              <span className="h-1.5 w-1.5 rounded-full bg-teal-500"></span>
-              Medical routing assistant
-            </div>
-            <h1 className="mt-6 text-5xl font-bold leading-tight tracking-tight text-slate-950">
-              Describe symptoms, find the right specialist nearby.
-            </h1>
-            <p className="mt-5 max-w-lg text-base leading-7 text-slate-600">
-              MedAssist routes patients toward relevant doctors based on symptoms and location. It helps with direction, not diagnosis or medical consultation.
-            </p>
-
-            <div className="mt-8 grid gap-3">
-              {trustPoints.map((point) => (
-                <div key={point} className="flex items-center gap-3 text-sm font-medium text-slate-700">
-                  <span className="h-2.5 w-2.5 rounded-full bg-teal-500 ring-4 ring-teal-50"></span>
-                  {point}
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-            <div className="rounded-xl bg-white p-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Mode</p>
-              <p className="mt-1 text-sm font-bold text-slate-800">Patient</p>
-            </div>
-            <div className="rounded-xl bg-white p-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Focus</p>
-              <p className="mt-1 text-sm font-bold text-slate-800">Triage</p>
-            </div>
-            <div className="rounded-xl bg-white p-4 shadow-sm">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Status</p>
-              <p className="mt-1 text-sm font-bold text-teal-700">Ready</p>
-            </div>
-          </div>
-        </section>
-
-        <section className="flex min-h-screen items-center justify-center px-5 py-10 sm:px-8">
-          <div className="w-full max-w-md">
-            <div className="mb-8 lg:hidden">
-              <div className="flex items-center gap-3">
-                <div className="h-11 w-11 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-xl shadow-sm shadow-blue-500/20">
-                  M
-                </div>
-                <div>
-                  <p className="text-lg font-bold tracking-tight">MedAssist</p>
-                  <p className="text-xs font-medium uppercase tracking-[0.18em] text-teal-600">Patient routing gateway</p>
-                </div>
-              </div>
-              <h1 className="mt-7 text-3xl font-bold leading-tight tracking-tight text-slate-950">
-                Find the right doctor faster.
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-slate-600">
-                Sign in to continue symptom-based routing and doctor discovery.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/60 sm:p-8">
-              <div className="mb-7">
-                <p className="text-sm font-semibold text-blue-600">Patient portal</p>
-                <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-950">Welcome back</h2>
-                <p className="mt-2 text-sm text-slate-500">Access your dashboard, routing history, and doctor matches.</p>
-              </div>
-
-              {isExpired && (
-                <div className="mb-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
-                  <span className="font-bold">Session Expired:</span> Your session has expired. Please log in again.
-                </div>
-              )}
-
-              {error && (
-                <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">
-                  {error}
-                </div>
-              )}
-
-              <form onSubmit={handleSubmit} className="space-y-5">
-                <div>
-                  <label className="mb-1.5 block text-sm font-semibold text-slate-700" htmlFor="email">
-                    Email address
-                  </label>
-                  <input
-                    id="email"
-                    type="email"
-                    required
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                    placeholder="you@example.com"
-                  />
-                </div>
-
-                <div>
-                  <div className="mb-1.5 flex items-center justify-between">
-                    <label className="block text-sm font-semibold text-slate-700" htmlFor="password">
-                      Password
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => setShowForgotModal(true)}
-                      className="text-xs font-semibold text-blue-600 transition hover:text-blue-700 bg-transparent border-none p-0 cursor-pointer"
-                    >
-                      Forgot password?
-                    </button>
-                  </div>
-                  <input
-                    id="password"
-                    type="password"
-                    required
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-900 outline-none transition focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                    placeholder="********"
-                  />
-                </div>
-
+              <div className="mb-1.5 flex items-center justify-between">
+                {/* A <span> sat here before, so the password field had no
+                    programmatically associated label. PasswordInput now
+                    generates its own id, so labelling it here would duplicate
+                    the visible text — hence aria-label instead. */}
+                <label htmlFor="login-password" className="text-sm font-medium text-slate-700">
+                  Password
+                </label>
                 <button
-                  type="submit"
-                  disabled={loading}
-                  className="w-full rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-70"
+                  type="button"
+                  onClick={() => setShowForgotModal(true)}
+                  className="min-h-11 rounded text-sm font-medium text-primary-600 hover:text-primary-700 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2"
                 >
-                  {loading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                      Signing in...
-                    </span>
-                  ) : (
-                    'Sign in'
-                  )}
+                  Forgot password?
                 </button>
-              </form>
-
-              <div className="mt-7 border-t border-slate-100 pt-6">
-                <div className="flex flex-col gap-3 sm:flex-row">
-                  <Link
-                    to="/signup"
-                    className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-3 text-center text-sm font-bold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700"
-                  >
-                    Create account
-                  </Link>
-                  <Link
-                    to="/doctor/login"
-                    className="flex-1 rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 text-center text-sm font-bold text-indigo-700 transition hover:border-indigo-200 hover:bg-indigo-100"
-                  >
-                    Provider portal
-                  </Link>
-                </div>
               </div>
+              <PasswordInput
+                ref={passwordRef}
+                id="login-password"
+                name="password"
+                autoComplete="current-password"
+                placeholder="••••••••"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (errors.password) setErrors((prev) => ({ ...prev, password: undefined }));
+                }}
+                error={errors.password}
+              />
             </div>
+            <label className="flex cursor-pointer items-center gap-2 text-sm font-medium text-slate-700 select-none">
+              <input
+                type="checkbox"
+                checked={rememberMe}
+                onChange={(e) => setRememberMe(e.target.checked)}
+                className="h-4 w-4 rounded border-slate-300 text-primary-600 accent-primary-600"
+              />
+              Remember me
+            </label>
+            <Button type="submit" variant="primary" size="lg" loading={loading} className="w-full">
+              Sign in
+            </Button>
+          </form>
 
-            <p className="mt-5 text-center text-xs text-slate-400">
-              For emergencies, contact local emergency services immediately.
+          <p className="mt-4 text-center text-sm text-slate-700">
+            New to MedAssist?{' '}
+            <Link to="/signup" className="font-semibold text-primary-600 hover:text-primary-700">
+              Create account
+            </Link>
+          </p>
+
+          {/* text-sm rather than text-xs: this is a privacy and emergency notice, and
+              it was previously the smallest text in the card while body copy
+              sat at 14px. */}
+          <div className="mt-4 space-y-0.5 border-t border-slate-100 pt-3 text-center text-sm text-slate-600">
+            <p className="flex items-center justify-center gap-1.5">
+              <LockIcon aria-hidden="true" className="h-3.5 w-3.5" />
+              Encrypted and never shared without consent
+            </p>
+            <p>
+              Emergency? Contact local services.{' '}
+              <Link to="/privacy" className="font-medium text-primary-600 hover:underline">
+                Privacy Policy
+              </Link>
             </p>
           </div>
-        </section>
-      </main>
+        </div>
+      </div>
 
-      <ForgotPasswordModal isOpen={showForgotModal} onClose={() => setShowForgotModal(false)} />
-    </div>
+        {showForgotModal && (
+          <ForgotPasswordModal isOpen={showForgotModal} onClose={() => setShowForgotModal(false)} />
+        )}
+      </AuthShell>
+    </>
   );
 }
