@@ -1,0 +1,156 @@
+# Tool configuration for the MedAssist backend.
+#
+# ruff and mypy both read this file. Neither is required to run the app --
+# only to develop it.
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+# Default is E4/E7/E9/F. The additions below are the rules that have caught
+# real problems in this codebase, not aspirational ones.
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort -- the import ordering here was genuinely inconsistent
+    "B",      # flake8-bugbear -- mutable defaults, shadowed loop vars
+    "UP",     # pyupgrade -- `Optional[X]` -> `X | None`, etc.
+    "SIM",    # flake8-simplify
+    "C4",     # flake8-comprehensions
+]
+
+ignore = [
+    # Line length is handled by the formatter, not the linter. Reporting both
+    # means every long line is flagged twice and fixed once.
+    "E501",
+
+    # `datetime.utcnow()` is deprecated in 3.12, but this codebase uses an
+    # explicit `_utcnow()` helper returning a naive UTC datetime, and SQLite
+    # stores naive datetimes. Changing the storage format would need a
+    # migration; see the Authentication section of docs/database_schema.md.
+    "UP017",
+
+    # FastAPI route functions legitimately take many arguments, and the
+    # dependency defaults are calls like Depends(get_db), not a mistake.
+    "B008",
+
+    # `os.path` throughout. Converting to pathlib would be a large diff across
+    # the routers and scripts for no behavioural gain, and the existing calls
+    # are correct. Not worth churning code the tests already cover.
+    "PTH100", "PTH103", "PTH107", "PTH110", "PTH112", "PTH113",
+    "PTH114", "PTH116", "PTH117", "PTH118", "PTH119", "PTH120",
+    "PTH122", "PTH123", "PTH204", "PTH207",
+
+    # `== True` / `== False` against boolean columns. SQLAlchemy needs the
+    # comparison for `WHERE is_verified = 1`, so this is deliberate and
+    # appears throughout the admin and search queries.
+    "E712",
+
+    # Docstrings and comments here use em-dashes and curly quotes
+    # deliberately; flagging them as ambiguous Unicode helps nobody.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# main.py defines the middleware class mid-file, directly above the app
+# configuration that uses it, so the import cannot move to the top.
+"main.py" = ["E402"]
+
+# A pre-pytest script, not part of the suite: it executes top-level code on
+# import against a running dev server. Superseded by tests/.
+"test_edge_cases.py" = ["E402"]
+
+# env.py has to extend sys.path before importing the application modules, so
+# its imports cannot all be at the top. Generated revisions follow it.
+"migrations/*.py" = ["E402"]
+"migrations/versions/*.py" = ["E402", "F401"]
+
+# Tests deliberately build malformed input, leave fixtures unused, and name
+# loop variables for readability rather than use.
+# Tests deliberately build malformed input, leave fixtures unused, and name
+# loop variables for readability rather than use.
+#
+# C408 is the `dict(...)` call form in the record factories. Ruff wants a
+# literal, but a literal cannot carry the `dict[str, object]` annotation mypy
+# needs to type the `**overrides` merge; without it mypy infers the
+# heterogeneous literal as `object` and rejects the assignment.
+"tests/*.py" = ["F401", "F811", "B007", "C408"]
+
+# Scripts fall into two groups. They import the backend modules by bare name,
+# which only resolves when run from the backend directory (E402); and they are
+# filter scripts, where a chain of `if bad: return False` guards reads better
+# than one compound condition (SIM103, B007).
+"scripts/*.py" = ["E402", "SIM103", "B007"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["auth_utils", "database", "limiter", "models", "schemas",
+                     "utils", "routers", "services", "main"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["auth_utils.py", "database.py", "models.py", "schemas.py", "utils.py",
+         "limiter.py", "routers", "services", "main.py"]
+# Not strict. The goal is to catch real type errors, not to reach a percentage;
+# `ignore_missing_imports` covers the many libraries shipping no inline types.
+ignore_missing_imports = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+# Disabling these two: the codebase has long, positional FastAPI route
+# signatures, and an untyped decorator call is not worth 100 annotations that
+# exist only to satisfy the checker.
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+# ---------------------------------------------------------------------------
+# Overrides
+# ---------------------------------------------------------------------------
+
+[[tool.mypy.overrides]]
+# Alembic revisions are generated; annotating them adds nothing. They are
+# already excluded from `files` above.
+module = ["alembic.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# The ORM attribute problem, and the reason it is scoped narrowly.
+#
+# models.py uses SQLAlchemy's classic `Column(...)` declarative style, so
+# mypy infers `Model.field` as `Column[str]` rather than `str`. Every
+# assignment to a model attribute and every read of one then looks like a type
+# error -- around 70 of the 95 reported here are that single artefact, not
+# real defects. The fix is rewriting the models with `Mapped[str]` and
+# `mapped_column()`, which is a schema-adjacent change large enough to want
+# its own pass and its own migration review.
+#
+# Until then, these two codes are disabled for the files that touch ORM
+# attributes. Everything else mypy would catch -- wrong argument counts,
+# None-unsafe returns, unreachable branches -- still applies.
+module = [
+    "models",
+    "database",
+    "main",
+    "routers.admin",
+    "routers.admin_common",
+    "routers.admin_doctors",
+    "routers.admin_taxonomy",
+    "routers.appointments",
+    "routers.auth",
+    "routers.doctor",
+    "routers.patient",
+    "routers.contact",
+    "services.*",
+]
+disable_error_code = ["assignment", "arg-type"]
+
+[[tool.mypy.overrides]]
+# Pydantic models and FastAPI dependencies rely on decorator magic that
+# mypy cannot follow: `Depends()` returns `Any` by design, and route
+# handlers are called by the framework rather than by typed code.
+module = ["schemas", "auth_utils", "utils", "limiter"]
+disable_error_code = ["assignment", "arg-type", "no-untyped-def"]

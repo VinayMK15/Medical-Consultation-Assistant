@@ -1,15 +1,52 @@
-alembic==1.19.1
-Mako==1.4.1
-cachetools==5.3.3
-deep-translator==1.11.4
-fastapi==0.135.1
-passlib==1.7.4
-pydantic==2.12.5
-pydantic_core==2.41.5
-python-jose==3.5.0
-python-multipart==0.0.27
-slowapi==0.1.10
-SQLAlchemy==2.0.47
+# MedAssist backend — runtime dependencies.
+#
+#   cd backend
+#   pip install -r requirements.txt
+#
+# Pinned exactly, including transitive dependencies that affect behaviour
+# (pydantic_core, bcrypt). A range like `fastapi>=0.135` would let two
+# installs differ in ways that are painful to debug.
+#
+# Test and lint tooling is deliberately separate: requirements-dev.txt.
+
+# --- Web framework -----------------------------------------------------------
+fastapi==0.136.0
 uvicorn==0.41.0
-httpx==0.27.0
-python-dotenv==1.0.1
+python-multipart==0.0.27
+# EmailStr is a pydantic type, but validating an address needs this package.
+# Without it, every schema importing EmailStr fails at import time.
+email-validator==2.3.0
+
+# --- Database ----------------------------------------------------------------
+SQLAlchemy==2.0.47
+alembic==1.19.1
+# Alembic's batch mode rebuilds tables by rendering Mako templates.
+Mako==1.4.1
+
+# --- Auth --------------------------------------------------------------------
+python-jose==3.5.0
+passlib[bcrypt]==1.7.4
+# Explicit: passlib's bcrypt extra does not reliably pin a working build
+# across platforms, and the version matters for the hash format.
+bcrypt==4.0.1
+
+# --- Validation --------------------------------------------------------------
+pydantic==2.13.4
+pydantic_core==2.41.5
+
+# --- NLP / translation -------------------------------------------------------
+# Local LLM client for the symptom-extraction tier. The code imports it at
+# module scope, so it must be installed even when OLLAMA_ENABLED=false.
+ollama==0.6.1
+deep-translator==1.11.4
+
+# --- HTTP client -------------------------------------------------------------
+# Used by the geocoding service for outbound Nominatim/OSRM requests.
+httpx==0.28.1
+
+# --- Rate limiting -----------------------------------------------------------
+slowapi==0.1.10
+cachetools==5.3.3
+
+# --- Config ------------------------------------------------------------------
+python-dotenv==1.0.0

@@ -1,13 +1,9 @@
-"""
-One-off script: creates admin@medassist.com / admin123 in medical_app.db.
-Run from the backend directory:
-    python create_admin.py
-"""
-import sys
+"""Create or reset the local development admin account."""
 from sqlalchemy.orm import Session
-from database import SessionLocal, engine
-from models import Base, User
+
 from auth_utils import get_password_hash
+from database import SessionLocal, engine
+from models import AdminUser, Base
 
 # Ensure tables exist (no-op if already created)
 Base.metadata.create_all(bind=engine)
@@ -15,25 +11,30 @@ Base.metadata.create_all(bind=engine)
 EMAIL    = "admin@medassist.com"
 PASSWORD = "admin123"
 NAME     = "Admin"
-ROLE     = "admin"
+ROLE = "admin"
 
 db: Session = SessionLocal()
 try:
-    existing = db.query(User).filter(User.email == EMAIL).first()
+    existing = db.query(AdminUser).filter(AdminUser.email == EMAIL).first()
     if existing:
-        print(f"[INFO] User '{EMAIL}' already exists (role='{existing.role}'). No changes made.")
-        sys.exit(0)
+        existing.hashed_password = get_password_hash(PASSWORD)
+        existing.full_name = NAME
+        existing.role = ROLE
+        existing.is_active = True
+        db.commit()
+        print(f"[OK] Admin account reset: id={existing.id}, email={existing.email}, role={existing.role}")
+    else:
+        admin = AdminUser(
+            email=EMAIL,
+            hashed_password=get_password_hash(PASSWORD),
+            full_name=NAME,
+            role=ROLE,
+            is_active=True,
+        )
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        print(f"[OK] Admin account created: id={admin.id}, email={admin.email}, role={admin.role}")
 
-    admin = User(
-        email=EMAIL,
-        hashed_password=get_password_hash(PASSWORD),
-        full_name=NAME,
-        role=ROLE,
-        is_verified=True,
-    )
-    db.add(admin)
-    db.commit()
-    db.refresh(admin)
-    print(f"[OK] Admin account created: id={admin.id}, email={admin.email}, role={admin.role}")
 finally:
     db.close()

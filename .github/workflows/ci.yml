@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push to the same branch cancels the previous run. Saves CI minutes
+  # when someone pushes a fix three times in a row.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  backend:
+    name: Backend (lint, types, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Match the project's floor. The venv here runs 3.14, but nothing
+          # in the codebase requires above 3.10.
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      # The tests need a SECRET_KEY: auth_utils refuses to import without one.
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy
+
+      # Proves the migration chain still builds the schema the app expects,
+      # and that a fresh database comes up clean. Runs against a throwaway file
+      # rather than the committed dev database.
+      - name: Verify migrations apply to an empty database
+        run: |
+          export DATABASE_URL="sqlite:///./ci_migrate_check.db"
+          alembic upgrade head
+          python - <<'PY'
+          import os, sqlite3
+          url = os.environ["DATABASE_URL"]
+          conn = sqlite3.connect(url.replace("sqlite:///", ""))
+          assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+          assert not conn.execute("PRAGMA foreign_key_check").fetchall()
+          tables = {
+              r[0] for r in conn.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table'")
+          }
+          expected = {
+              "users", "doctors", "admin_users", "appointments",
+              "patient_settings", "specializations", "symptom_mappings",
+              "condition_symptoms", "regional_symptom_keywords",
+              "symptom_aliases", "contact_messages",
+          }
+          missing = expected - tables
+          assert not missing, f"migrations did not create: {sorted(missing)}"
+          print(f"schema OK: {len(expected)} tables")
+          PY
+
+      - name: Test
+        run: pytest --cov=. --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: backend/coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: Frontend (lint, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # A build failure from a bad import is the common case, and lint will
+      # not catch it.
+      - name: Build
+        run: npm run build

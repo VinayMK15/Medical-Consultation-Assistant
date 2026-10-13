@@ -1,0 +1,21 @@
+# Development and CI dependencies.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Kept out of requirements.txt so a production install does not carry a test
+# runner and a linter.
+
+# --- Tests -------------------------------------------------------------------
+pytest==9.1.1
+pytest-cov==7.1.0
+# httpx ships with fastapi already, but pinning it here keeps the TestClient
+# contract explicit: starlette's TestClient is built on it.
+httpx==0.28.1
+
+# --- Linting and formatting --------------------------------------------------
+ruff==0.16.10
+
+# --- Type checking -----------------------------------------------------------
+mypy==2.4.0
+# Stubs for the libraries that ship no inline types of their own.
+types-passlib==1.7.7.20260211

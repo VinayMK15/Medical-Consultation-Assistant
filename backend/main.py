@@ -1,162 +1,160 @@
 """
-main.py - MedAssist API Entrypoint
+MedAssist API entrypoint.
 
-Registers all routers and middleware. Business logic lives in routers/:
-  - routers/auth.py         → /api/auth/*
-  - routers/doctor.py       → /api/doctor/*
-  - routers/patient.py      → /api/patient/*
-  - routers/appointments.py → /api/appointments/*
-  - routers/admin.py        → /api/admin/*
+Application wiring: the lifespan handler, middleware, router registration, and
+the endpoints that belong to no feature router -- `/api/doctors` for the
+background map and `/process` for the symptom chat.
+
+Everything else lives elsewhere:
+  - routers/       HTTP layer, one module per feature
+  - services/      business logic that is not HTTP-shaped
+
+    nlp_processor  symptom extraction and regional vocabulary matching
+    routing        symptom -> specialty, curated and IDF-weighted
+    doctor_search  filtering, ranking and capping doctor results
+    vocabulary     the vocabularies, and how they are loaded
+    geo            geocoding and haversine distance
+    translator     language detection and translation
+    email_service  transactional email
+
+The vocabularies and routing caches are built explicitly in the lifespan
+handler, not at import time. Importing any service must not open a database
+connection -- that previously broke read-only replicas, workers starting before
+migrations, and the test suite.
 """
-import os
-import math
-import random
+
 import logging
-from typing import Optional, List, Dict, Any
+import os
 from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, HTTPException, Depends, status, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from cachetools import TTLCache
-
-from slowapi import _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from limiter import limiter
-
-from database import engine, get_db, SessionLocal
-import models
-from models import User, Doctor, AdminUser, SymptomMapping, Specialization
-from schemas import ProcessRequest
-from auth_utils import get_current_user
-from services.translator_logic import detect_and_translate_to_english, translate_from_english
-from services.nlp_processor import extract_medical_info, normalize_city
-from services.geo import resolve_coords_sync, haversine, CITY_AREA_COORDS
-
-from routers import auth, doctor, patient, appointments, admin
+from typing import Any
 
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from cachetools import TTLCache
+from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from sqlalchemy.orm import Session
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from auth_utils import get_current_user
+from database import checkpoint_wal, engine, get_db
+from limiter import limiter
+from models import Doctor
+from routers import (
+    admin,
+    admin_doctors,
+    admin_taxonomy,
+    appointments,
+    auth,
+    contact,
+    doctor,
+    patient,
+)
+from schemas import ProcessRequest
+from services import routing, vocabulary
+from services.doctor_search import find_doctors
+from services.geo import resolve_coords_sync, resolve_doctor_display_coords
+from services.nlp_processor import extract_medical_info, normalize_city
+from services.routing import format_specialists, format_specialists_count, get_specialists
+from services.translator_logic import (
+    detect_and_translate_to_english,
+    translate_from_english,
+)
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Symptom Cache System (DB-backed)
-# ---------------------------------------------------------------------------
-_symptom_cache: Dict[str, str] = {}
+# Re-exported for the admin routes, the NLP service and the tests, which
+# rebuild the routing cache after changing a mapping. Kept importable from
+# `main` so none of them has to reach into services/ for one name.
+invalidate_symptom_cache = routing.invalidate_symptom_cache
+get_specialist = routing.get_specialist
+save_learned_symptom = routing.save_learned_symptom
 
-
-def load_symptom_cache(db: Optional[Session] = None):
-    """Load all symptom mappings from DB into memory cache."""
-    global _symptom_cache
-    close_db = False
-    if db is None:
-        db = SessionLocal()
-        close_db = True
-    try:
-        mappings = db.query(SymptomMapping).all()
-        _symptom_cache = {m.symptom.lower().strip(): m.specialist for m in mappings}
-        logger.info("Loaded %d symptom mappings into cache.", len(_symptom_cache))
-    except Exception as exc:
-        logger.warning("Could not load symptom cache from DB: %s", exc)
-    finally:
-        if close_db:
-            db.close()
-
-
-def invalidate_symptom_cache():
-    """Reload symptom cache from database."""
-    load_symptom_cache()
-
-
-def save_learned_symptom(symptom: str, specialist: str, added_by: str = "NLP"):
-    """Persist a dynamically learned symptom mapping to DB and cache."""
-    global _symptom_cache
-    symptom_clean = symptom.lower().strip()
-    db = SessionLocal()
-    try:
-        existing = db.query(SymptomMapping).filter(SymptomMapping.symptom == symptom_clean).first()
-        if not existing:
-            mapping = SymptomMapping(
-                symptom=symptom_clean,
-                specialist=specialist,
-                is_custom=True,
-                added_by=added_by,
-            )
-            db.add(mapping)
-            db.commit()
-            _symptom_cache[symptom_clean] = specialist
-    except Exception as exc:
-        logger.warning("Failed to persist learned symptom '%s': %s", symptom, exc)
-    finally:
-        db.close()
-
-
-def get_specialist(symptoms: str) -> str:
-    """Return the best-matching specialist for the given symptom string from DB cache."""
-    global _symptom_cache
-    if not _symptom_cache:
-        load_symptom_cache()
-
-    if not symptoms:
-        return "General Physician"
-    lower = symptoms.lower()
-
-    # Search in DB cache (longest match first)
-    for keyword in sorted(_symptom_cache, key=len, reverse=True):
-        if keyword in lower:
-            return _symptom_cache[keyword]
-
-    return "General Physician"
-
-
-# Eagerly initialize cache on module load
-load_symptom_cache()
+# Backing store for the multi-turn symptom chat. TTL-bounded so a patient who
+# abandons a conversation does not leak a session entry indefinitely.
+SESSION_TTL_SECONDS = 60 * 30
+SESSION_MAX_SIZE = 1000
+sessions: TTLCache = TTLCache(maxsize=SESSION_MAX_SIZE, ttl=SESSION_TTL_SECONDS)
 
 
 # ---------------------------------------------------------------------------
-# Lifespan context manager
+# Lifespan
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Startup:
-      1. Validate Alembic migration state.
-      2. Preload DB-backed symptom cache.
+      1. Validate the Alembic revision.
+      2. Build the vocabularies and routing caches.
+    Shutdown:
+      3. Checkpoint the WAL so the .db file is self-contained.
     """
-    try:
-        alembic_cfg = Config("alembic.ini")
-        script = ScriptDirectory.from_config(alembic_cfg)
-        head_revision = script.get_current_head()
-
-        with engine.connect() as conn:
-            context = MigrationContext.configure(conn)
-            current_revision = context.get_current_revision()
-
-        if current_revision != head_revision:
-            logger.warning(
-                "Database migrations are not up to date. Current: %s | Head: %s | Run: alembic upgrade head",
-                current_revision,
-                head_revision,
-            )
-        else:
-            logger.info("Database schema is up to date at revision: %s", current_revision)
-    except Exception as e:
-        logger.warning("Could not validate Alembic migration state: %s", e)
-
-    # Preload symptom cache
-    load_symptom_cache()
+    _validate_migrations()
+    _warm_caches()
 
     yield  # Application runs here
 
+    # Fold the WAL back into the main database. Without this, committed rows
+    # stay in the -wal sidecar and a plain file copy of the .db is missing
+    # them.
+    #
+    # PASSIVE, not TRUNCATE: TRUNCATE needs exclusive access to reset the WAL
+    # file, so it blocks for the full busy_timeout whenever any request still
+    # holds a read transaction. PASSIVE copies what it can and returns
+    # immediately, which is the right trade for a shutdown path.
+    try:
+        _busy, log_pages, checkpointed = checkpoint_wal("PASSIVE")
+        logger.info(
+            "WAL checkpointed on shutdown: %d pages copied, %d still in WAL.",
+            checkpointed, log_pages,
+        )
+    except Exception as exc:
+        logger.warning("WAL checkpoint on shutdown failed: %s", exc)
 
+
+def _validate_migrations() -> None:
+    """
+    Warn when the database is behind the migration head.
+
+    A warning rather than a refusal: the app can still serve most endpoints
+    against an older schema, and refusing to start would turn a fixable
+    problem into an outage.
+    """
+    try:
+        script = ScriptDirectory.from_config(Config("alembic.ini"))
+        head_revision = script.get_current_head()
+
+        with engine.connect() as conn:
+            current = MigrationContext.configure(conn).get_current_revision()
+
+        if current != head_revision:
+            logger.warning(
+                "Database migrations are not up to date. Current: %s | Head: %s "
+                "| Run: alembic upgrade head",
+                current, head_revision,
+            )
+        else:
+            logger.info("Database schema is up to date at revision: %s", current)
+    except Exception as exc:
+        logger.warning("Could not validate Alembic migration state: %s", exc)
+
+
+def _warm_caches() -> None:
+    """Build the in-memory vocabularies and routing caches."""
+    vocabulary.warm_all()
+    routing.warm_caches()
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
 app = FastAPI(title="MedAssist API", version="1.0.0", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
-# Rate Limiting
+# Rate limiting
 # ---------------------------------------------------------------------------
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -166,7 +164,8 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # ---------------------------------------------------------------------------
 _ALLOWED_ORIGINS = os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174"
+    "http://localhost:5173,http://127.0.0.1:5173,"
+    "http://localhost:5174,http://127.0.0.1:5174",
 ).split(",")
 
 app.add_middleware(
@@ -177,181 +176,126 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ---------------------------------------------------------------------------
-# Register routers
+# Security headers
+# ---------------------------------------------------------------------------
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add OWASP-recommended security headers to every response."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(self), microphone=(self)"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' unpkg.com; "
+            "style-src 'self' 'unsafe-inline' fonts.googleapis.com; "
+            "font-src 'self' fonts.gstatic.com; "
+            "img-src 'self' data: *.tile.openstreetmap.org; "
+            "connect-src 'self' localhost:8000 nominatim.openstreetmap.org "
+            "router.project-osrm.org"
+        )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ---------------------------------------------------------------------------
+# Routers
 # ---------------------------------------------------------------------------
 app.include_router(auth.router)
 app.include_router(doctor.router)
 app.include_router(patient.router)
 app.include_router(appointments.router)
+app.include_router(contact.router)
+
+# The admin panel spans three modules: users, doctors, and the symptom
+# taxonomy. All share the /api/admin prefix; the frontend addresses them by
+# literal path.
 app.include_router(admin.router)
-
-# ---------------------------------------------------------------------------
-# TTL session store for NLP chat
-# ---------------------------------------------------------------------------
-SESSION_TTL_SECONDS = 60 * 30  # 30 minutes
-SESSION_MAX_SIZE = 1000
-sessions: TTLCache = TTLCache(maxsize=SESSION_MAX_SIZE, ttl=SESSION_TTL_SECONDS)
-
-
-def get_patient_coords(city: Optional[str], area: Optional[str]) -> tuple[Optional[float], Optional[float]]:
-    """Helper forwarding to resolve_coords_sync."""
-    return resolve_coords_sync(city=city, address=area)
+app.include_router(admin_doctors.router)
+app.include_router(admin_taxonomy.router)
 
 
 # ---------------------------------------------------------------------------
-# Doctor Search Engine (queries Doctor model)
-# ---------------------------------------------------------------------------
-def find_doctors(
-    city: Optional[str],
-    area: Optional[str],
-    specialist: str,
-    db: Optional[Session] = None,
-    patient_lat: Optional[float] = None,
-    patient_lng: Optional[float] = None,
-) -> list:
-    """
-    Query verified & active doctors from the Doctor table.
-    Sort by proximity if patient coordinates are available.
-    """
-    # Overload flexibility: if db passed as float/int
-    if isinstance(db, (float, int)):
-        patient_lng = patient_lat
-        patient_lat = db
-        db = None
-
-    if not city:
-        return []
-
-    close_db_on_exit = False
-    if db is None:
-        db = SessionLocal()
-        close_db_on_exit = True
-
-    try:
-        base_q = db.query(Doctor).filter(
-            Doctor.is_verified == True,
-            Doctor.is_active == True,
-        )
-
-        def location_filter(q):
-            city_lower = city.lower()
-            conditions = [Doctor.practice_city.ilike(f"%{city_lower}%")]
-            if area:
-                area_lower = area.lower()
-                conditions.append(Doctor.practice_address.ilike(f"%{area_lower}%"))
-            return q.filter(or_(*conditions))
-
-        def to_dict(doc: Doctor) -> dict:
-            lat = doc.practice_lat or 0.0
-            lng = doc.practice_lng or 0.0
-
-            if lat == 0.0 or lng == 0.0:
-                doc_address = (doc.practice_address or "").lower()
-                matched_area = next(
-                    (coords for area_name, coords in CITY_AREA_COORDS.items() if area_name.lower() in doc_address),
-                    None,
-                )
-                if matched_area:
-                    base_lat, base_lng = matched_area
-                else:
-                    matched_key = next((k for k in CITY_AREA_COORDS if k.lower() == (city or "").lower()), None)
-                    base_lat, base_lng = CITY_AREA_COORDS[matched_key] if matched_key else (12.9716, 77.5946)
-
-                lat = base_lat + random.uniform(-0.008, 0.008)
-                lng = base_lng + random.uniform(-0.008, 0.008)
-
-            return {
-                "id": doc.id,
-                "name": doc.full_name or "Unknown Doctor",
-                "specialty": doc.specialization or "General Physician",
-                "address": doc.practice_address or doc.practice_city or city,
-                "city": doc.practice_city or city,
-                "lat": lat,
-                "lng": lng,
-                "experience_years": doc.experience_years,
-                "consultation_fee": doc.consultation_fee,
-            }
-
-        city_pool_q = location_filter(base_q)
-
-        matched = city_pool_q.filter(Doctor.specialization.ilike(specialist)).all()
-        if matched:
-            results = [to_dict(d) for d in matched]
-        else:
-            gp = city_pool_q.filter(Doctor.specialization.ilike("General Physician")).all()
-            if gp:
-                results = [to_dict(d) for d in gp]
-            else:
-                results = [to_dict(d) for d in city_pool_q.limit(3).all()]
-
-        # Deduplicate
-        seen_keys = set()
-        deduped = []
-        for d in results:
-            key = (d["name"].strip().lower(), d["specialty"].strip().lower(), (d.get("address") or "").strip().lower())
-            if key not in seen_keys:
-                seen_keys.add(key)
-                deduped.append(d)
-        results = deduped
-
-        if patient_lat is not None and patient_lng is not None:
-            for doc_dict in results:
-                doc_dict["distance_km"] = haversine(
-                    float(patient_lat), float(patient_lng), float(doc_dict["lat"]), float(doc_dict["lng"])
-                )
-            results.sort(key=lambda d: d["distance_km"])
-
-        return results
-    finally:
-        if close_db_on_exit:
-            db.close()
-
-
-class UserMessage(ProcessRequest):
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Background Map & Exploration Endpoint
+# Background map
 # ---------------------------------------------------------------------------
 @app.get("/api/doctors")
 def get_all_active_doctors(db: Session = Depends(get_db)):
-    """Return all verified & active doctors for background map rendering."""
-    docs = db.query(Doctor).filter(Doctor.is_verified == True, Doctor.is_active == True).all()
-    return [
-        {
-            "id": d.id,
-            "name": d.full_name,
-            "specialty": d.specialization,
-            "city": d.practice_city,
-            "address": d.practice_address,
-            "lat": d.practice_lat or 12.9716,
-            "lng": d.practice_lng or 77.5946,
-            "experience_years": d.experience_years,
-            "consultation_fee": d.consultation_fee,
-        }
-        for d in docs
-    ]
+    """
+    Return all verified and active doctors for background map rendering.
+
+    Unfiltered by city: the map needs every marker to place, and the client
+    filters. That makes this O(n) in the doctor count -- fine at a few
+    hundred rows, and the reason a much larger platform would want a
+    bounding-box query instead. See `services/doctor_search.py` for the same
+    trade-off documented where the code lives.
+    """
+    docs = db.query(Doctor).filter(
+        Doctor.is_verified == True,  # noqa: E712
+        Doctor.is_active == True,  # noqa: E712
+    ).all()
+
+    results = []
+    for doc in docs:
+        lat, lng = resolve_doctor_display_coords(doc)
+        results.append({
+            "id": doc.id,
+            "name": doc.full_name,
+            "specialty": doc.specialization,
+            "city": doc.practice_city,
+            "address": doc.practice_address,
+            "lat": lat,
+            "lng": lng,
+            "experience_years": doc.experience_years,
+            "consultation_fee": doc.consultation_fee,
+        })
+    return results
 
 
 # ---------------------------------------------------------------------------
-# Root health check
+# Health
 # ---------------------------------------------------------------------------
 @app.get("/")
 def read_root():
     return {"message": "Medical Consultation Assistant API is running."}
 
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/v1/models")
+def get_models():
+    return {"object": "list", "data": []}
+
+
 # ---------------------------------------------------------------------------
-# NLP / AI chat endpoint
+# Symptom chat
 # ---------------------------------------------------------------------------
 @app.post("/process")
 def process_message(
-    msg: UserMessage,
+    msg: ProcessRequest,
     current_user: Any = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """
+    The symptom chat endpoint.
+
+    Accumulates symptoms and location across turns in a TTL-cached session,
+    resolves them to ranked specialists, then returns matching doctors.
+
+    Location is resolved in priority order: coordinates the browser supplied,
+    then the authenticated user's profile, then what this conversation has
+    established. The reply reports whether enough is known to route yet, so
+    the client can keep asking rather than showing an empty map.
+    """
     session_id = msg.session_id
     raw_text = msg.text or msg.message or ""
 
@@ -374,98 +318,92 @@ def process_message(
     area = session["area"]
     extracted_city = city
     extracted_area = area
-    specialist = get_specialist(symptoms)
+    specialists = get_specialists(symptoms)
 
     doctors = []
     patient_lat = None
     patient_lng = None
 
-    # Priority 1: Live coordinates sent from frontend request
+    # The authenticated user's own location, used only to fill gaps. The
+    # conversation always wins: a city the patient typed this turn is more
+    # current than the one saved at signup.
+    profile_city = (
+        getattr(current_user, "home_city", None)
+        or getattr(current_user, "practice_city", None)
+        or getattr(current_user, "city", None)
+    )
+    profile_addr = (
+        getattr(current_user, "home_address", None)
+        or getattr(current_user, "practice_address", None)
+        or getattr(current_user, "address", None)
+    )
+
+    # City is resolved FIRST and independently of coordinates.
+    #
+    # These used to be one if/elif chain, which meant that a browser sending
+    # live coordinates consumed the branch that would otherwise have read the
+    # profile -- so `city` stayed None and the reply asked the patient for a
+    # city they had already saved on their profile. Coordinates answer "how far
+    # away is this doctor"; the city answers "which doctors are candidates at
+    # all" (find_doctors returns [] without one). They are separate questions
+    # and must not gate each other.
+    #
+    # Only the city is taken from the profile, never the street address: `area`
+    # reaches the client as the map's city label, and a full postal address
+    # there renders as "3 near 1487, 5th Cross Rd, ...". The address is still
+    # used below, for coordinate resolution, where its precision is wanted.
+    if not extracted_city and profile_city:
+        extracted_city = profile_city
+        city = profile_city
+
+    # Coordinates, most precise source first.
+    #
+    # Priority 1: live coordinates from the browser. More accurate than
+    # anything stored, and it avoids a geocoding round-trip.
     if msg.patient_lat is not None and msg.patient_lng is not None:
         patient_lat = msg.patient_lat
         patient_lng = msg.patient_lng
-        user_city = getattr(current_user, "home_city", getattr(current_user, "city", None))
-        user_addr = getattr(current_user, "home_address", getattr(current_user, "address", None))
 
-        if not extracted_city and user_city:
-            extracted_city = user_city
-            city = user_city
-            if not extracted_area and user_addr:
-                extracted_area = user_addr
-                area = user_addr
-        elif not extracted_city:
-            # Check nearest city within supported areas
-            closest_city = None
-            min_dist = float("inf")
-            for c_name in ["Bangalore", "Mumbai", "Delhi", "Chennai", "Hyderabad", "Pune", "Kolkata"]:
-                c_lat, c_lng = CITY_AREA_COORDS[c_name.lower()]
-                dist = haversine(patient_lat, patient_lng, c_lat, c_lng)
-                if dist < min_dist:
-                    min_dist = dist
-                    closest_city = c_name
-            if closest_city and min_dist < 100:
-                extracted_city = closest_city
-                city = closest_city
-
-    # Priority 2: Stored lat/lng from patient profile
-    elif (
-        current_user
-        and getattr(current_user, "home_lat", getattr(current_user, "practice_lat", getattr(current_user, "lat", None))) is not None
-        and getattr(current_user, "home_lng", getattr(current_user, "practice_lng", getattr(current_user, "lng", None))) is not None
-    ):
-        patient_lat = getattr(current_user, "home_lat", getattr(current_user, "practice_lat", getattr(current_user, "lat", None)))
-        patient_lng = getattr(current_user, "home_lng", getattr(current_user, "practice_lng", getattr(current_user, "lng", None)))
-        user_city = getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None)))
-        user_addr = getattr(current_user, "home_address", getattr(current_user, "practice_address", getattr(current_user, "address", None)))
-        if not extracted_city and user_city:
-            extracted_city = user_city
-            city = user_city
-        if not extracted_area and user_addr:
-            extracted_area = user_addr
-            area = user_addr
-
-    # Priority 3: City name from user profile
-    elif (
-        current_user
-        and getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None))) is not None
-        and str(getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", "")))).strip() != ""
-    ):
-        user_city = getattr(current_user, "home_city", getattr(current_user, "practice_city", getattr(current_user, "city", None)))
-        user_addr = getattr(current_user, "home_address", getattr(current_user, "practice_address", getattr(current_user, "address", None)))
-        patient_lat, patient_lng = resolve_coords_sync(user_city, user_addr)
-        if not extracted_city:
-            extracted_city = user_city
-            city = user_city
-        if not extracted_area and user_addr:
-            extracted_area = user_addr
-            area = user_addr
-
-    # Priority 4: NLP extracted city / area
-    else:
-        patient_lat, patient_lng = resolve_coords_sync(extracted_city, extracted_area)
+    # Priority 2: the local city/area table. Resolving from it avoids calling
+    # Nominatim for the same city repeatedly. The profile address takes part
+    # here as the lookup key, so a saved home location resolves to the same
+    # coordinates the map is already showing.
+    elif extracted_city:
+        patient_lat, patient_lng = resolve_coords_sync(
+            city=extracted_city,
+            address=extracted_area or profile_addr,
+        )
 
     display_location = extracted_area or extracted_city
 
     if symptoms and extracted_city:
         doctors = find_doctors(
-            extracted_city, extracted_area, specialist, db, patient_lat=patient_lat, patient_lng=patient_lng
+            city=extracted_city,
+            area=extracted_area,
+            specialist=specialists,
+            db=db,
+            patient_lat=patient_lat,
+            patient_lng=patient_lng,
         )
+        spec_label = format_specialists(specialists)
         if doctors:
             reply = (
-                f"I've found {len(doctors)} {specialist}(s) in "
+                f"I've found {len(doctors)} "
+                f"{format_specialists_count(specialists, len(doctors))} in "
                 f"{display_location} who can help with your {symptoms}. "
                 f"Mapping them now..."
             )
         else:
             reply = (
-                f"I couldn't find a {specialist} near {display_location} "
+                f"I couldn't find a {spec_label} near {display_location} "
                 f"for your {symptoms}. Try a nearby city or broader area."
             )
         consultation_status = "complete"
     elif symptoms and not city:
         reply = (
             f"I understand you're experiencing {symptoms}. "
-            f"Which city are you in so I can find a {specialist} for you?"
+            f"Which city are you in so I can find a "
+            f"{format_specialists(specialists)} for you?"
         )
         consultation_status = "incomplete"
     elif city and not symptoms:
@@ -491,4 +429,18 @@ def process_message(
         "doctors": doctors,
         "patient_lat": patient_lat,
         "patient_lng": patient_lng,
+        "specialists": specialists,
+        "session_id": session_id,
     }
+
+
+# Names re-exported for the routers, services and tests, which import them
+# from `main` rather than reaching into services/ for a single symbol.
+__all__ = [
+    "app",
+    "find_doctors",
+    "get_specialist",
+    "invalidate_symptom_cache",
+    "lifespan",
+    "save_learned_symptom",
+]

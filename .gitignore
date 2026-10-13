@@ -15,7 +15,6 @@ venv/
 .env/
 env/
 
-# Environment secrets — NEVER commit these
 backend/.env
 .env
 *.env
@@ -23,9 +22,23 @@ backend/.env
 !.env.example
 !**/.env.example
 
+# Test & coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # SQLite database — local dev only
 *.db
 *.sqlite3
+# WAL sidecars, plus the ad-hoc .bak copies that used to accumulate next to
+# the database. None of these belong in version control.
+*.db-wal
+*.db-shm
+*.db-journal
+*.bak
+*.bak[0-9]*
 
 # ── Node / Frontend ───────────────────────────────────────────────────────────
 node_modules/

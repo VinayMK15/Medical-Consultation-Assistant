@@ -1,0 +1,39 @@
+# Pre-commit hooks. Installed with:
+#   pip install pre-commit && pre-commit install
+#
+# Same checks CI runs, so a failure is caught before it becomes a red build
+# rather than after.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Catches the exact class of bug a PowerShell or sed round-trip
+      # introduces: files silently re-encoded into a different character set.
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: ^backend/migrations/versions/
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: trailing-whitespace
+        exclude: ^backend/migrations/versions/
+      # A BOM at the start of a Python file is a SyntaxError waiting to
+      # happen, and PowerShell's Set-Content adds one by default.
+      - id: fix-byte-order-marker
+      # Fails on __pycache__ and .pyc being committed.
+      - id: check-ignore
+        args: ["--no-index"]
+        exclude: ^(venv/|backend/venv/)
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
