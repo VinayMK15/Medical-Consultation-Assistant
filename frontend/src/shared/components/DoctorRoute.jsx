@@ -1,8 +1,10 @@
 import React, { useContext } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Outlet } from 'react-router-dom';
 import { AuthContext } from '../context/AuthContext';
 
-export default function DoctorRoute({ children }) {
+// Layout route: renders the nested route via <Outlet />. A `children` prop is
+// never passed here, so returning it renders a blank page.
+export default function DoctorRoute() {
   const { token, user } = useContext(AuthContext);
 
   // Fallback to localStorage to prevent race conditions during login navigation
@@ -28,5 +30,5 @@ export default function DoctorRoute({ children }) {
     return <Navigate to="/login" replace />;
   }
 
-  return children;
+  return <Outlet />;
 }

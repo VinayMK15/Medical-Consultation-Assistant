@@ -16,8 +16,6 @@ export const CITY_COORDS = {
   Hyderabad:  [17.3850, 78.4867],
   Pune:       [18.5204, 73.8567],
   Kolkata:    [22.5726, 88.3639],
-  London:     [51.5074, -0.1278],
-  'New York': [40.7128, -74.0060],
 };
 
 export const CITY_AREA_COORDS = {
@@ -29,8 +27,6 @@ export const CITY_AREA_COORDS = {
   Hyderabad:  [17.3850, 78.4867],
   Pune:       [18.5204, 73.8567],
   Kolkata:    [22.5726, 88.3639],
-  London:     [51.5074, -0.1278],
-  'New York': [40.7128, -74.0060],
 
   // Bangalore areas
   Koramangala:       [12.9352, 77.6245],

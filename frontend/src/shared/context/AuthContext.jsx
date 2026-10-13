@@ -5,6 +5,39 @@ import { useSessionTimeout } from '../hooks/useSessionTimeout';
 export const AuthContext = createContext();
 
 // ---------------------------------------------------------------------------
+// Persistent-vs-session storage routing ("Remember me")
+// ---------------------------------------------------------------------------
+
+/** Storage holding the current session (local if remembered, else session). */
+function getSessionStore() {
+  try {
+    if (sessionStorage.getItem('token')) return sessionStorage;
+  } catch { /* ignore */ }
+  return localStorage;
+}
+
+/** Read a session value from whichever store holds it. */
+function getSessionItem(key) {
+  try {
+    const v = localStorage.getItem(key);
+    if (v) return v;
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+/** Clear session values from both stores. */
+function clearSessionItems() {
+  try {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    sessionStorage.removeItem('token');
+    sessionStorage.removeItem('user');
+  } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -39,10 +72,10 @@ function loginPathForRole(role) {
 // ---------------------------------------------------------------------------
 
 export const AuthProvider = ({ children }) => {
-  const [token, setToken] = useState(() => localStorage.getItem('token') || null);
+  const [token, setToken] = useState(() => getSessionItem('token'));
   const [user, setUser] = useState(() => {
     try {
-      const stored = localStorage.getItem('user');
+      const stored = getSessionItem('user');
       return stored ? JSON.parse(stored) : null;
     } catch {
       return null;
@@ -51,18 +84,17 @@ export const AuthProvider = ({ children }) => {
 
   // ── Token expiry check on mount / page refresh ───────────────────────────
   useEffect(() => {
-    const storedToken = localStorage.getItem('token');
+    const storedToken = getSessionItem('token');
     if (storedToken && isTokenExpired(storedToken)) {
       // Token is stale — clear everything and redirect to the right login
       let role = null;
       try {
-        const u = JSON.parse(localStorage.getItem('user') || '{}');
+        const u = JSON.parse(getSessionItem('user') || '{}');
         role = u?.role;
         if (u?.email) sessionStorage.removeItem(`medassist_session_${u.email}`);
       } catch { /* ignore */ }
 
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
+      clearSessionItems();
       setToken(null);
       setUser(null);
 
@@ -76,8 +108,7 @@ export const AuthProvider = ({ children }) => {
     const email = user?.email;
 
     if (email) sessionStorage.removeItem(`medassist_session_${email}`);
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearSessionItems();
     setToken(null);
     setUser(null);
 
@@ -89,7 +120,7 @@ export const AuthProvider = ({ children }) => {
 
   // ── Auth actions ─────────────────────────────────────────────────────────
 
-  const login = async (email, password, endpoint = '/api/auth/patient/login') => {
+  const login = async (email, password, endpoint = '/api/auth/patient/login', rememberMe = true) => {
     const formData = new URLSearchParams();
     formData.append('username', email);
     formData.append('password', password);
@@ -99,8 +130,10 @@ export const AuthProvider = ({ children }) => {
     });
 
     const { access_token, user: userData } = response.data;
-    localStorage.setItem('token', access_token);
-    localStorage.setItem('user', JSON.stringify(userData));
+    const store = rememberMe ? localStorage : sessionStorage;
+    clearSessionItems();
+    store.setItem('token', access_token);
+    store.setItem('user', JSON.stringify(userData));
     setToken(access_token);
     setUser(userData);
     return response.data;
@@ -113,8 +146,7 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     if (user?.email) sessionStorage.removeItem(`medassist_session_${user.email}`);
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    clearSessionItems();
     setToken(null);
     setUser(null);
   };
@@ -122,7 +154,7 @@ export const AuthProvider = ({ children }) => {
   const updateUserSession = (updates) => {
     setUser((prev) => {
       const updated = { ...prev, ...updates };
-      localStorage.setItem('user', JSON.stringify(updated));
+      getSessionStore().setItem('user', JSON.stringify(updated));
       return updated;
     });
   };

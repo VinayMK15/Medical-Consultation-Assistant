@@ -1,8 +1,11 @@
 import React, { useContext } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, Outlet } from 'react-router-dom';
 import { AuthContext } from '../context/AuthContext';
 
-export default function ProtectedRoute({ children }) {
+// Used as a layout route (`<Route element={<ProtectedRoute />}>`), so the
+// nested route renders through <Outlet />, not a `children` prop. Returning
+// `children` here yields undefined and the page renders blank.
+export default function ProtectedRoute() {
   const { token, user } = useContext(AuthContext);
 
   // Fallback to localStorage to prevent race conditions during login navigation
@@ -26,9 +29,9 @@ export default function ProtectedRoute({ children }) {
     return <Navigate to="/doctor/dashboard" replace />;
   }
 
-  if (localUser?.role === 'admin') {
+  if (['admin', 'superadmin'].includes(localUser?.role)) {
     return <Navigate to="/admin/dashboard" replace />;
   }
 
-  return children;
+  return <Outlet />;
 }

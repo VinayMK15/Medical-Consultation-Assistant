@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import Modal from '../../../shared/components/ui/Modal';
 
 // Supported Indian regional languages for Web Speech API
 export const SUPPORTED_VOICE_LANGS = [
@@ -15,7 +16,23 @@ export const SUPPORTED_VOICE_LANGS = [
 ];
 
 export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
-  const [selectedLang, setSelectedLang] = useState('hi-IN');
+  // Read the browser locale once at mount. The whole interface is in English,
+  // yet voice input used to listen in Hindi until the user opened the dropdown.
+  // Anyone can still override from the select below.
+  const [selectedLang, setSelectedLang] = useState(() => {
+    try {
+      const browser = (navigator.language || '').toLowerCase();      // "hi-in"
+      const base = browser.split('-')[0];                             // "hi"
+      const match = SUPPORTED_VOICE_LANGS.find(
+        (l) =>
+          l.code.toLowerCase() === browser ||
+          l.code.toLowerCase().startsWith(base + '-')
+      );
+      return match ? match.code : 'en-IN';
+    } catch {
+      return 'en-IN';
+    }
+  });
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [interimText, setInterimText] = useState('');
@@ -23,6 +40,10 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
   const [isSupported, setIsSupported] = useState(true);
 
   const recognitionRef = useRef(null);
+  const micRef = useRef(null);
+  // The language-switch restart is debounced by a timer, so it has to be
+  // cancellable — see handleLanguageChange.
+  const restartTimerRef = useRef(null);
 
   // Initialize SpeechRecognition
   useEffect(() => {
@@ -35,17 +56,16 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
     }
   }, []);
 
-  // Cleanup on unmount or close
-  useEffect(() => {
-    if (!isOpen) {
-      stopListening();
-      setTranscript('');
-      setInterimText('');
-      setErrorMsg('');
-    }
-  }, [isOpen]);
+  // Cleanup when the dialog closes. Defined after stopListening below so it
+  // is not referenced before its declaration (it was, via the effect body).
+  // The Modal primitive now calls stopListening on close too, so this only
+  // has to reset the transcript state.
 
-  const startListening = () => {
+  // `langOverride` exists so the language-switch restart reuses this exact path.
+  // There used to be a second, trimmed-down copy of this function, which
+  // swallowed every recognition error and left stale interim text on screen.
+  const startListening = (langOverride) => {
+    const lang = langOverride || selectedLang;
     setErrorMsg('');
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -62,7 +82,7 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
       }
 
       const recognition = new SpeechRecognition();
-      recognition.lang = selectedLang;
+      recognition.lang = lang;
       recognition.continuous = true;
       recognition.interimResults = true;
 
@@ -95,7 +115,12 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
         if (event.error === 'not-allowed') {
           setErrorMsg('Microphone access was denied. Please allow microphone permissions in your browser.');
         } else if (event.error === 'no-speech') {
-          // No speech detected, keep waiting or stop gracefully
+          // Silence used to fall through with no message and no state change,
+          // so tapping the mic and saying nothing did nothing at all. In a
+          // noisy ward, or with a muted mic, "we did not hear that" is the
+          // actionable message. Instructional wording: the banner is red, but
+          // this is not a failure.
+          setErrorMsg('We did not catch that. Tap the microphone and describe your symptoms again.');
         } else if (event.error !== 'aborted') {
           setErrorMsg(`Voice recognition error: ${event.error}`);
         }
@@ -139,51 +164,18 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
   const handleLanguageChange = (e) => {
     const newLang = e.target.value;
     setSelectedLang(newLang);
-    if (isListening) {
-      stopListening();
-      // Wait for recognition to stop before restarting in new language
-      setTimeout(() => {
-        startListeningWithLang(newLang);
-      }, 200);
-    }
-  };
 
-  const startListeningWithLang = (lang) => {
-    const SpeechRecognition =
-      window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
+    // A restart queued by the previous change must not fire, or two recognition
+    // instances run concurrently and both write into the same state.
+    clearTimeout(restartTimerRef.current);
 
-    try {
-      const recognition = new SpeechRecognition();
-      recognition.lang = lang;
-      recognition.continuous = true;
-      recognition.interimResults = true;
+    if (!isListening) return;
 
-      recognition.onstart = () => setIsListening(true);
-      recognition.onresult = (event) => {
-        let currentInterim = '';
-        let currentFinal = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const item = event.results[i];
-          if (item.isFinal) {
-            currentFinal += item[0].transcript + ' ';
-          } else {
-            currentInterim += item[0].transcript;
-          }
-        }
-        if (currentFinal) {
-          setTranscript((prev) => (prev ? `${prev.trim()} ${currentFinal.trim()}` : currentFinal.trim()));
-        }
-        setInterimText(currentInterim);
-      };
-      recognition.onerror = () => setIsListening(false);
-      recognition.onend = () => setIsListening(false);
-
-      recognitionRef.current = recognition;
-      recognition.start();
-    } catch (err) {
-      console.error(err);
-    }
+    stopListening();
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
+      startListening(newLang);
+    }, 200);
   };
 
   const handleApply = () => {
@@ -201,51 +193,74 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
     setErrorMsg('');
   };
 
-  if (!isOpen) return null;
+  // Reset the transcript when the dialog is reopened, so a previous
+  // conversation's text doesn't reappear.
+  useEffect(() => {
+    if (!isOpen) {
+      // Covers the dialog closing inside the 200ms restart window. Without
+      // this, a queued restart would start recognition on a closed modal and
+      // leave the microphone hot with no visible UI.
+      clearTimeout(restartTimerRef.current);
+      setTranscript('');
+      setInterimText('');
+      setErrorMsg('');
+    }
+  }, [isOpen]);
+
+  // A pending restart must not survive unmount either.
+  useEffect(() => () => clearTimeout(restartTimerRef.current), []);
 
   const currentDisplayText = (transcript + (interimText ? ' ' + interimText : '')).trim();
   const selectedLangObj = SUPPORTED_VOICE_LANGS.find((l) => l.code === selectedLang) || SUPPORTED_VOICE_LANGS[0];
 
+  // Never leave the mic running if the dialog is dismissed by any route.
+  const handleClose = () => {
+    // Cleared here too, not only in the isOpen effect: this path can run
+    // before that effect flushes.
+    clearTimeout(restartTimerRef.current);
+    stopListening();
+    onClose();
+  };
+
   return (
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm animate-fadeIn">
-      <div className="relative w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl transition-all border border-slate-100">
-        
+    <Modal
+      isOpen={isOpen}
+      onClose={handleClose}
+      labelledBy="voice-intake-title"
+      initialFocusRef={micRef}
+      overlayClassName="fixed inset-0 z-[1200] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm animate-fadeIn"
+      panelClassName="max-w-lg rounded-2xl border border-slate-100 p-6"
+      closeButtonClassName="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+      closeButtonLabel="Close voice input"
+    >
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-100">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
+            <div aria-hidden="true" className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
               </svg>
             </div>
             <div>
-              <h3 className="text-lg font-bold text-slate-900">Voice Symptom Intake</h3>
-              <p className="text-xs text-slate-500">Speak naturally in your preferred regional language</p>
+              <h3 id="voice-intake-title" className="text-lg font-bold text-slate-900">Voice Symptom Intake</h3>
+              <p className="text-sm text-slate-500">Speak naturally in your preferred regional language</p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              stopListening();
-              onClose();
-            }}
-            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
         </div>
 
         {/* Language Selection Row */}
-        <div className="mt-4 flex items-center justify-between rounded-xl bg-slate-50 p-3 border border-slate-200">
-          <span className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
-            <span>🌐</span> Spoken Language:
-          </span>
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-slate-50 p-3 border border-slate-200">
+          <label
+            htmlFor="voice-lang"
+            className="text-sm font-semibold text-slate-700 flex items-center gap-1.5"
+          >
+            <span aria-hidden="true">🌐</span> Spoken Language:
+          </label>
           <select
+            id="voice-lang"
             value={selectedLang}
             onChange={handleLanguageChange}
-            className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 cursor-pointer"
+            className="min-h-11 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 shadow-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 cursor-pointer"
           >
             {SUPPORTED_VOICE_LANGS.map((lang) => (
               <option key={lang.code} value={lang.code}>
@@ -265,10 +280,21 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
               </>
             )}
             <button
+              ref={micRef}
               type="button"
               onClick={toggleListening}
               disabled={!isSupported}
-              className={`relative z-10 flex h-20 w-20 items-center justify-center rounded-full shadow-lg transition transform active:scale-95 ${
+              // The listening state is announced rather than conveyed only by
+              // the pulsing visual, which a screen reader cannot perceive.
+              aria-label={
+                !isSupported
+                  ? 'Speech input is not supported in this browser'
+                  : isListening
+                    ? `Stop listening in ${selectedLangObj.native}`
+                    : `Start listening in ${selectedLangObj.native}`
+              }
+              aria-pressed={isListening}
+              className={`relative z-10 flex h-20 w-20 items-center justify-center rounded-full shadow-lg transition transform active:scale-95 focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-300 ${
                 isListening
                   ? 'bg-red-500 text-white shadow-red-500/30 hover:bg-red-600'
                   : 'bg-blue-600 text-white shadow-blue-500/30 hover:bg-blue-700'
@@ -286,14 +312,20 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
             </button>
           </div>
 
-          <p className="mt-3 text-sm font-medium text-slate-700">
+          <p
+            // aria-live so recognition results are spoken as they arrive;
+            // before this, the transcript updated silently.
+            aria-live="polite"
+            aria-atomic="true"
+            className="mt-3 text-sm font-medium text-slate-700"
+          >
             {isListening ? (
               <span className="flex items-center gap-1.5 text-red-600 animate-pulse font-semibold">
-                <span className="h-2 w-2 rounded-full bg-red-600" />
+                <span aria-hidden="true" className="h-2 w-2 rounded-full bg-red-600" />
                 Listening in {selectedLangObj.native}... (Tap to stop)
               </span>
             ) : (
-              <span className="text-slate-500">Tap microphone and describe your symptoms</span>
+              <span className="text-slate-600">Tap microphone and describe your symptoms</span>
             )}
           </p>
         </div>
@@ -301,14 +333,14 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
         {/* Transcribed Text Area */}
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+            <span className="text-sm font-semibold text-slate-600">
               Speech Transcript
             </span>
             {currentDisplayText && (
               <button
                 type="button"
                 onClick={handleClear}
-                className="text-xs font-medium text-slate-400 hover:text-red-500 transition"
+                className="min-h-11 rounded-lg px-3 py-2 text-sm font-medium text-slate-600 hover:text-red-600 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
               >
                 Clear
               </button>
@@ -319,10 +351,10 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
             {currentDisplayText ? (
               <p className="font-medium text-slate-900">
                 {transcript}
-                {interimText && <span className="text-slate-400 italic"> {interimText}</span>}
+                {interimText && <span className="text-slate-500 italic"> {interimText}</span>}
               </p>
             ) : (
-              <p className="text-slate-400 italic text-xs">
+              <p className="text-slate-500 italic text-sm">
                 Spoken words in {selectedLangObj.native} ({selectedLangObj.label}) will appear here in real time...
               </p>
             )}
@@ -331,8 +363,11 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
 
         {/* Error Message */}
         {errorMsg && (
-          <div className="mt-3 rounded-lg bg-red-50 p-2.5 text-xs font-medium text-red-600 border border-red-100 flex items-center gap-2">
-            <span>⚠️</span>
+          <div
+            role="alert"
+            className="mt-3 rounded-lg bg-red-50 p-3 text-sm font-medium text-red-700 border border-red-100 flex items-center gap-2"
+          >
+            <span aria-hidden="true">⚠️</span>
             <span>{errorMsg}</span>
           </div>
         )}
@@ -341,11 +376,8 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
         <div className="mt-6 flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
           <button
             type="button"
-            onClick={() => {
-              stopListening();
-              onClose();
-            }}
-            className="rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 transition"
+            onClick={handleClose}
+            className="min-h-11 rounded-xl px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
           >
             Cancel
           </button>
@@ -354,14 +386,12 @@ export default function VoiceInputModal({ isOpen, onClose, onApplyText }) {
             type="button"
             onClick={handleApply}
             disabled={!currentDisplayText}
-            className="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex min-h-11 items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-blue-500/20 transition hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2"
           >
-            <span>✓</span>
+            <span aria-hidden="true">✓</span>
             <span>Use in Search</span>
           </button>
         </div>
-
-      </div>
-    </div>
+    </Modal>
   );
 }

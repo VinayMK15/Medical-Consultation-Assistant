@@ -1,9 +1,13 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import useDocumentTitle from '../../hooks/useDocumentTitle';
+import SkipLink from './SkipLink';
 
 export default function NotFound() {
+  useDocumentTitle('Page Not Found');
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center px-5 text-slate-900">
+      <SkipLink />
       <div className="w-full max-w-md text-center">
         <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/60 sm:p-10">
           <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-blue-50">
@@ -34,7 +38,7 @@ export default function NotFound() {
           </div>
         </div>
 
-        <p className="mt-5 text-xs text-slate-400">
+        <p className="mt-5 text-xs text-slate-500">
           For emergencies, contact local emergency services immediately.
         </p>
       </div>

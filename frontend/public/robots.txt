@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /admin/
+Disallow: /doctor/dashboard
+Disallow: /profile/
+Sitemap: https://medassist.com/sitemap.xml
