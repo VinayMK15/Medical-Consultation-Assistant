@@ -17,9 +17,11 @@ Run:
 """
 
 from datetime import date, timedelta
-from database import SessionLocal
-from models import User, Doctor, AdminUser, Appointment, SymptomMapping, Specialization
+
 from passlib.context import CryptContext
+
+from database import SessionLocal
+from models import AdminUser, Appointment, Doctor, Specialization, SymptomMapping, User
 from services.geo import resolve_coords_sync
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -94,6 +96,9 @@ def build_30_doctors():
             "practice_lat": lat,
             "practice_lng": lng,
             "experience_years": 5 + (i % 15),
+            "qualifications": "MBBS, MD",
+            "license_number": f"KMC-{50000 + i}",
+            "phone": f"98{(2000000 + i * 13791) % 10000000:07d}",
             "consultation_fee": 500.0 + (i % 5) * 100,
             "bio": f"Experienced {spec} practicing at {area}, Bangalore.",
             "shift_start": shift_start,
@@ -113,6 +118,9 @@ PENDING_DOCTORS = [
         "practice_city": "Bangalore",
         "practice_address": "Indiranagar, Bangalore",
         "experience_years": 8,
+        "qualifications": "MBBS, MD (Dermatology)",
+        "license_number": "KMC-61001",
+        "phone": "9845011001",
         "consultation_fee": 600.0,
     },
     {
@@ -123,6 +131,9 @@ PENDING_DOCTORS = [
         "practice_city": "Bangalore",
         "practice_address": "Jayanagar, Bangalore",
         "experience_years": 12,
+        "qualifications": "MBBS, MD (Pediatrics)",
+        "license_number": "KMC-61002",
+        "phone": "9845011002",
         "consultation_fee": 700.0,
     },
     {
@@ -133,6 +144,9 @@ PENDING_DOCTORS = [
         "practice_city": "Bangalore",
         "practice_address": "Koramangala, Bangalore",
         "experience_years": 9,
+        "qualifications": "MBBS, MD (Psychiatry)",
+        "license_number": "KMC-61003",
+        "phone": "9845011003",
         "consultation_fee": 800.0,
     },
     {
@@ -143,6 +157,9 @@ PENDING_DOCTORS = [
         "practice_city": "Bangalore",
         "practice_address": "Whitefield, Bangalore",
         "experience_years": 15,
+        "qualifications": "MBBS, MS (OBG)",
+        "license_number": "KMC-61004",
+        "phone": "9845011004",
         "consultation_fee": 900.0,
     },
     {
@@ -153,6 +170,9 @@ PENDING_DOCTORS = [
         "practice_city": "Bangalore",
         "practice_address": "Malleshwaram, Bangalore",
         "experience_years": 18,
+        "qualifications": "MBBS, MS (Ortho)",
+        "license_number": "KMC-61005",
+        "phone": "9845011005",
         "consultation_fee": 1000.0,
     },
 ]
@@ -312,7 +332,22 @@ def seed_database():
         db.commit()
         print("\n[ok] Admin created: admin@medassist.com / admin123")
 
-        # 3. Seed Primary Doctor
+        # 3. Seed Specializations
+        # Must precede the doctor seeding: doctors.specialization is a foreign
+        # key to specializations.name, so a doctor cannot reference a
+        # specialization that does not exist yet.
+        print(f"[seed] Seeding {len(SPECIALIZATIONS_DATA)} specializations...")
+        for sp in SPECIALIZATIONS_DATA:
+            spec_obj = Specialization(
+                name=sp["name"],
+                description=sp["description"],
+                common_conditions=sp["common_conditions"],
+            )
+            db.add(spec_obj)
+        db.commit()
+        print("[ok] Specializations seeded.")
+
+        # 4. Seed Primary Doctor
         lat, lng = resolve_coords_sync("Bangalore", "Koramangala, Bangalore")
         primary_doctor = Doctor(
             full_name="Dr. Anjali Sharma",
@@ -339,7 +374,7 @@ def seed_database():
         db.refresh(primary_doctor)
         print("[ok] Primary Doctor created: doctor@medassist.com / doctor123")
 
-        # 4. Seed Patients
+        # 5. Seed Patients
         p1_lat, p1_lng = resolve_coords_sync("Bangalore", "Indiranagar, Bangalore")
         p1 = User(
             full_name="Test Patient",
@@ -368,8 +403,8 @@ def seed_database():
         db.refresh(p1)
         print("[ok] Patients created: test1@gmail.com / test1@123")
 
-        # 5. Seed 30 Verified Specialty Doctors
-        print(f"\n[seed] Creating 30 verified specialty doctors...")
+        # 6. Seed 30 Verified Specialty Doctors
+        print("\n[seed] Creating 30 verified specialty doctors...")
         specialist_doctors = build_30_doctors()
         for doc_data in specialist_doctors:
             doc = Doctor(
@@ -382,6 +417,9 @@ def seed_database():
                 practice_lat=doc_data["practice_lat"],
                 practice_lng=doc_data["practice_lng"],
                 experience_years=doc_data["experience_years"],
+                qualifications=doc_data["qualifications"],
+                license_number=doc_data["license_number"],
+                phone=doc_data["phone"],
                 consultation_fee=doc_data["consultation_fee"],
                 bio=doc_data["bio"],
                 shift_start=doc_data["shift_start"],
@@ -393,8 +431,8 @@ def seed_database():
         db.commit()
         print("[ok] 30 Verified doctors added.")
 
-        # 6. Seed Pending Doctors
-        print(f"[seed] Creating 5 pending doctors...")
+        # 7. Seed Pending Doctors
+        print("[seed] Creating 5 pending doctors...")
         for p_doc in PENDING_DOCTORS:
             lat, lng = resolve_coords_sync(p_doc["practice_city"], p_doc["practice_address"])
             doc = Doctor(
@@ -407,6 +445,9 @@ def seed_database():
                 practice_lat=lat,
                 practice_lng=lng,
                 experience_years=p_doc["experience_years"],
+                qualifications=p_doc["qualifications"],
+                license_number=p_doc["license_number"],
+                phone=p_doc["phone"],
                 consultation_fee=p_doc["consultation_fee"],
                 is_verified=False,
                 is_active=True,
@@ -415,8 +456,8 @@ def seed_database():
         db.commit()
         print("[ok] 5 Pending doctors added.")
 
-        # 7. Seed Demo Appointments
-        print(f"[seed] Creating demo appointments...")
+        # 8. Seed Demo Appointments
+        print("[seed] Creating demo appointments...")
         tomorrow = date.today() + timedelta(days=1)
         demo_appts = [
             Appointment(
@@ -440,7 +481,7 @@ def seed_database():
         db.commit()
         print("[ok] Demo appointments added.")
 
-        # 8. Seed Symptom Mappings
+        # 9. Seed Symptom Mappings
         print(f"[seed] Seeding {len(BUILTIN_SYMPTOMS)} symptom mappings...")
         for sym, spec, urg in BUILTIN_SYMPTOMS:
             mapping = SymptomMapping(
@@ -453,18 +494,6 @@ def seed_database():
             db.add(mapping)
         db.commit()
         print("[ok] Symptom mappings seeded.")
-
-        # 9. Seed Specializations
-        print(f"[seed] Seeding {len(SPECIALIZATIONS_DATA)} specializations...")
-        for sp in SPECIALIZATIONS_DATA:
-            spec_obj = Specialization(
-                name=sp["name"],
-                description=sp["description"],
-                common_conditions=sp["common_conditions"],
-            )
-            db.add(spec_obj)
-        db.commit()
-        print("[ok] Specializations seeded.")
 
         print("\n" + "=" * 60)
         print("  Database Seeding Completed Successfully!")

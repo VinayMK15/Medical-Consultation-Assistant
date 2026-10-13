@@ -1,5 +1,6 @@
-import requests
 from datetime import date, timedelta
+
+import requests
 
 BASE = "http://127.0.0.1:8000"
 
@@ -52,7 +53,7 @@ def run_vacation_audit():
     # Step B: Doctor checks calendar-summary
     today_dt = date.today()
     summary_res = requests.get(f"{BASE}/api/doctor/calendar-summary?year={today_dt.year}&month={today_dt.month}", headers=headers_doc)
-    print(f"\n-- STEP B: Doctor fetches calendar summary --")
+    print("\n-- STEP B: Doctor fetches calendar summary --")
     print(f"Status: {summary_res.status_code}")
     if test_vacation_date in summary_res.json().get("blocked_dates", []):
         print("  [PASS] calendar-summary endpoint returns blocked date correctly.")
@@ -77,7 +78,7 @@ def run_vacation_audit():
         "symptoms_summary": "Vacation test booking"
     }
     book_res = requests.post(f"{BASE}/api/appointments", json=book_payload, headers=headers_pat)
-    print(f"\n-- STEP D: Patient attempts to book on vacation date --")
+    print("\n-- STEP D: Patient attempts to book on vacation date --")
     print(f"Status: {book_res.status_code} | Detail: {book_res.json().get('detail')}")
     if book_res.status_code == 400 and "vacation" in book_res.json().get('detail', '').lower():
         print("  [PASS] Booking rejected with HTTP 400 (Doctor is on vacation).")

@@ -1,12 +1,17 @@
-from fastapi import APIRouter, HTTPException, Depends, Query, status
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-import models
 import schemas
-from database import get_db
-from models import User, Doctor, Appointment
 from auth_utils import get_current_patient
+from database import get_db
+from models import Appointment, Doctor, PatientSettings, User
 from services.geo import resolve_coords_sync
+
+
+def _utcnow():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 router = APIRouter(prefix="/api/patient", tags=["Patient"])
 
@@ -103,6 +108,63 @@ def update_patient_profile(
     }
 
 
+@router.get("/settings", response_model=schemas.PatientSettingsResponse)
+def get_patient_settings(
+    current_patient: User = Depends(get_current_patient),
+    db: Session = Depends(get_db)
+):
+    """Return the patient's notification preferences, creating defaults on first read.
+
+    Lazy creation keeps the table sparse — patients who never open the
+    settings page never get a row.
+    """
+    row = (
+        db.query(PatientSettings)
+        .filter(PatientSettings.user_id == current_patient.id)
+        .first()
+    )
+    if row is None:
+        row = PatientSettings(
+            user_id=current_patient.id,
+            appointment_emails=True,
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+
+    return {"appointment_emails": bool(row.appointment_emails)}
+
+
+@router.put("/settings", response_model=schemas.PatientSettingsResponse)
+def update_patient_settings(
+    payload: schemas.PatientSettingsUpdate,
+    current_patient: User = Depends(get_current_patient),
+    db: Session = Depends(get_db)
+):
+    """Partially update the patient's notification preferences.
+
+    Stored only. This does NOT gate the booking/cancellation email paths —
+    those always send, matching the current behaviour.
+    """
+    row = (
+        db.query(PatientSettings)
+        .filter(PatientSettings.user_id == current_patient.id)
+        .first()
+    )
+    if row is None:
+        row = PatientSettings(user_id=current_patient.id)
+        db.add(row)
+
+    if payload.appointment_emails is not None:
+        row.appointment_emails = payload.appointment_emails
+
+    row.updated_at = _utcnow()
+    db.commit()
+    db.refresh(row)
+
+    return {"appointment_emails": bool(row.appointment_emails)}
+
+
 @router.get("/appointments")
 def get_patient_appointments(
     skip: int = Query(0, ge=0, description="Number of records to skip"),
@@ -124,11 +186,23 @@ def get_patient_appointments(
     for appt, doc in rows:
         data.append({
             "id": appt.id,
+            "patient_id": current_patient.id,
+            "patient_name": current_patient.full_name,
+            "patient_email": current_patient.email,
+            "patient_phone": current_patient.phone,
+            "patient_age": current_patient.age,
+            "patient_gender": current_patient.gender,
+            "doctor_id": doc.id,
             "doctor_name": doc.full_name or "Unknown Doctor",
             "specialty": doc.specialization or "General",
+            "doctor_license": doc.license_number or "",
+            "doctor_phone": doc.phone or "",
+            "doctor_city": doc.practice_city or "",
+            "address": doc.practice_address or doc.practice_city or "",
             "appointment_date": appt.appointment_date.isoformat() if appt.appointment_date else None,
             "slot_time": appt.slot_time,
             "symptoms": appt.symptoms_summary,
+            "symptoms_summary": appt.symptoms_summary,
             "status": appt.status,
             "prescription_notes": appt.prescription_notes,
         })

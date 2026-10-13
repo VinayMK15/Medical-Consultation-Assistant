@@ -10,8 +10,9 @@ Run:  python test_edge_cases.py
 
 import os
 import sqlite3
-import requests
 from datetime import date, timedelta
+
+import requests
 
 DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "medical_app.db")
 BASE = "http://127.0.0.1:8000"
@@ -94,7 +95,7 @@ SLOTS_DATE = (date.today() + timedelta(days=rand_offset + 3)).isoformat()
 
 # -----------------------------------------------------------------------------
 print("\n-- TEST 1: Booking OUTSIDE doctor's shift hours --")
-print(f"   Doctor shift: 09:00-17:00. Attempting to book 07:00 and 17:30.\n")
+print("   Doctor shift: 09:00-17:00. Attempting to book 07:00 and 17:30.\n")
 
 r = book(token_patient, DOCTOR_ID, TEST_DATE, "07:00", "Early bird booking")
 check("Book slot 07:00 (before shift start) - should be rejected", r, 400)
@@ -123,9 +124,9 @@ print("\n-- TEST 4: Booking with unverified doctor --\n")
 # Get an unverified doctor ID
 conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
-cursor.execute("SELECT id, full_name FROM users WHERE role='doctor' AND is_verified=0 LIMIT 1")
+cursor.execute("SELECT id, full_name FROM doctors WHERE is_verified=0 AND is_active=1 LIMIT 1")
 unverified = cursor.fetchone()
-cursor.execute("SELECT id, full_name FROM users WHERE role='doctor' AND is_verified=1 AND id != ? LIMIT 1", (DOCTOR_ID,))
+cursor.execute("SELECT id, full_name FROM doctors WHERE is_verified=1 AND is_active=1 AND id != ? LIMIT 1", (DOCTOR_ID,))
 doc_b = cursor.fetchone()
 conn.close()
 

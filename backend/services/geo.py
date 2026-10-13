@@ -1,6 +1,8 @@
 import logging
 import math
-from typing import Optional, Tuple
+import random
+from typing import Any
+
 import httpx
 
 logger = logging.getLogger(__name__)
@@ -114,9 +116,9 @@ def haversine(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 
 def resolve_coords_sync(
-    city: Optional[str] = None,
-    address: Optional[str] = None,
-) -> Tuple[Optional[float], Optional[float]]:
+    city: str | None = None,
+    address: str | None = None,
+) -> tuple[float | None, float | None]:
     """
     Synchronous resolution using fast dictionary and substring lookup.
     Checks address/area first, then city.
@@ -145,9 +147,9 @@ def resolve_coords_sync(
 
 
 async def resolve_coords(
-    city: Optional[str] = None,
-    address: Optional[str] = None,
-) -> Tuple[Optional[float], Optional[float]]:
+    city: str | None = None,
+    address: str | None = None,
+) -> tuple[float | None, float | None]:
     """
     Async 3-tier coordinate resolution:
       1. Static dictionary / substring lookup (fastest).
@@ -204,3 +206,68 @@ async def resolve_coords(
             logger.warning("Nominatim city-only geocoding failed for '%s': %s", city, exc)
 
     return (None, None)
+
+
+def resolve_doctor_display_coords(
+    doctor: Any,
+    fallback_city: str | None = None,
+) -> tuple[float, float]:
+    """
+    Resolve display coordinates for a doctor with deterministic jitter fallback.
+
+    1. Returns (practice_lat, practice_lng) if both are present and non-zero.
+    2. Otherwise, resolves base coordinates from practice_address area or practice_city.
+    3. If unresolved, falls back to fallback_city (e.g. search city) or Bangalore center (12.9716, 77.5946).
+    4. Applies deterministic jitter seeded by doctor.id so the position is consistent across calls.
+    """
+    if isinstance(doctor, dict):
+        lat = doctor.get("practice_lat") or 0.0
+        lng = doctor.get("practice_lng") or 0.0
+        address = doctor.get("practice_address") or ""
+        city = doctor.get("practice_city") or ""
+        doc_id = doctor.get("id") or 0
+    else:
+        lat = getattr(doctor, "practice_lat", None) or 0.0
+        lng = getattr(doctor, "practice_lng", None) or 0.0
+        address = getattr(doctor, "practice_address", None) or ""
+        city = getattr(doctor, "practice_city", None) or ""
+        doc_id = getattr(doctor, "id", None) or 0
+
+    try:
+        lat_f = float(lat)
+        lng_f = float(lng)
+    except (TypeError, ValueError):
+        lat_f, lng_f = 0.0, 0.0
+
+    if lat_f != 0.0 and lng_f != 0.0:
+        return (lat_f, lng_f)
+
+    # Missing coordinates: resolve base from address area, doctor city, or fallback city
+    doc_address = address.lower()
+    matched_area = next(
+        (coords for area_name, coords in CITY_AREA_COORDS.items() if area_name.lower() in doc_address),
+        None,
+    )
+    if matched_area:
+        base_lat, base_lng = matched_area
+    else:
+        doc_city = city.strip().lower()
+        matched_key = next((k for k in CITY_AREA_COORDS if k.lower() == doc_city), None)
+        if matched_key is None and fallback_city:
+            matched_key = next((k for k in CITY_AREA_COORDS if k.lower() == fallback_city.strip().lower()), None)
+        if matched_key is not None:
+            base_lat, base_lng = CITY_AREA_COORDS[matched_key]
+        else:
+            base_lat, base_lng = (12.9716, 77.5946)
+
+    try:
+        seed_id = int(doc_id)
+    except (TypeError, ValueError):
+        seed_id = 0
+
+    rng_lat = random.Random(seed_id * 2)
+    rng_lng = random.Random(seed_id * 2 + 1)
+    jitter_lat = rng_lat.uniform(-0.008, 0.008)
+    jitter_lng = rng_lng.uniform(-0.008, 0.008)
+
+    return (round(base_lat + jitter_lat, 6), round(base_lng + jitter_lng, 6))

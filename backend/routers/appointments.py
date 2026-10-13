@@ -1,15 +1,18 @@
+import logging
 from datetime import date as date_type
 
-from fastapi import APIRouter, HTTPException, Depends, Query, status, BackgroundTasks
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 import schemas
-from database import get_db
-from models import User, Doctor, Appointment
-from auth_utils import get_current_user, get_current_patient
-from utils import generate_time_slots
+from auth_utils import get_current_patient, get_current_user
+from database import begin_immediate, get_db
+from models import Appointment, Doctor, User
 from services.email_service import send_booking_confirmation, send_cancellation_notice
+from utils import generate_time_slots
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/appointments", tags=["Appointments"])
 
@@ -42,7 +45,7 @@ def get_available_slots(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid date format. Use YYYY-MM-DD.",
-        )
+        ) from None
 
     # 3. Check for vacations/blocked dates
     if doctor.blocked_dates and date in doctor.blocked_dates:
@@ -62,12 +65,12 @@ def get_available_slots(
 
     # 4. Generate all possible slots
     try:
-        total_slots = generate_time_slots(shift_start, shift_end)
+        total_slots = generate_time_slots(shift_start, shift_end, interval_minutes=doctor.slot_duration_minutes or 30)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Cannot generate slots: {exc}",
-        )
+        ) from exc
 
     # 5. Query already-booked slots for this doctor + date
     booked_appointments = (
@@ -95,7 +98,7 @@ def get_available_slots(
         booked_slots.update({appt.slot_time for appt in patient_appointments})
 
     available_slots = sorted(set(total_slots) - booked_slots)
-    booked_slots_list = sorted(list(booked_slots))
+    booked_slots_list = sorted(booked_slots)
 
     return {
         "doctor_id": doctor_id,
@@ -118,6 +121,15 @@ def create_appointment(
     current_patient: User = Depends(get_current_patient),
     db: Session = Depends(get_db),
 ):
+    # Everything below reads and then writes, so the write lock is taken up
+    # front rather than upgraded mid-transaction. Two concurrent bookings for
+    # the same slot would otherwise both pass the double-booking guards below
+    # and collide at COMMIT, where SQLite has no way to resolve them: one gets
+    # SQLITE_BUSY and, with a deferred transaction, a deadlock rather than a
+    # clean wait. Here the loser waits on busy_timeout and then either sees the
+    # committed row or hits the partial unique index and returns 409.
+    begin_immediate(db)
+
     # Validate doctor exists, is verified, and is active
     doctor = db.query(Doctor).filter(Doctor.id == appointment.doctor_id).first()
     if not doctor:
@@ -174,6 +186,11 @@ def create_appointment(
         .first()
     )
     if existing_doctor_appt:
+        logger.warning(
+            "Booking rejected (doctor-taken): patient_id=%s doctor_id=%s date=%s slot=%s",
+            current_patient.id, appointment.doctor_id,
+            appointment.appointment_date, appointment.slot_time,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -195,6 +212,11 @@ def create_appointment(
         .first()
     )
     if existing_patient_appt:
+        logger.warning(
+            "Booking rejected (patient-taken): patient_id=%s doctor_id=%s date=%s slot=%s",
+            current_patient.id, appointment.doctor_id,
+            appointment.appointment_date, appointment.slot_time,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -218,6 +240,11 @@ def create_appointment(
         db.refresh(new_appointment)
     except IntegrityError:
         db.rollback()
+        logger.warning(
+            "Booking race (unique-violation at commit): patient_id=%s doctor_id=%s date=%s slot=%s",
+            current_patient.id, appointment.doctor_id,
+            appointment.appointment_date, appointment.slot_time,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
@@ -225,7 +252,7 @@ def create_appointment(
                 f"{appointment.appointment_date} was just booked "
                 f"by another request. Please select a different slot."
             ),
-        )
+        ) from None
 
     # Fire background email task
     background_tasks.add_task(
@@ -238,6 +265,9 @@ def create_appointment(
             "specialty": doctor.specialization,
             "date": str(appointment.appointment_date),
             "time": appointment.slot_time,
+            "practice_address": doctor.practice_address,
+            "practice_lat": doctor.practice_lat,
+            "practice_lng": doctor.practice_lng,
         },
     )
 
@@ -251,6 +281,10 @@ def cancel_appointment(
     current_patient: User = Depends(get_current_patient),
     db: Session = Depends(get_db),
 ):
+    # Read-then-write, same as booking: the status check decides whether this
+    # row may change, so the lock is taken before the check rather than after.
+    begin_immediate(db)
+
     appt = db.query(Appointment).filter(
         Appointment.id == appointment_id,
         Appointment.patient_id == current_patient.id,
